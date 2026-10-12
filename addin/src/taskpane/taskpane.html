@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Logistic Regression</title>
+
+  <!-- Office.js: required, must come from Microsoft's CDN -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- Chart.js for the ROC curve and coefficient chart -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+  <link rel="stylesheet" href="taskpane.css"/>
+</head>
+<body>
+  <header class="app-header">
+    <span class="dot"></span>
+    <h1>Logistic regression</h1>
+  </header>
+
+  <!-- Backend status banner -->
+  <div id="backend-status" class="banner banner-warn">
+    Checking backend connection…
+  </div>
+
+  <!-- Backend URL is configurable at runtime so the SAME add-in works against
+       a local server (dev) or a deployed cloud API (demo) with no rebuild. -->
+  <details class="settings">
+    <summary>Backend settings</summary>
+    <div class="settings-body">
+      <label class="field">
+        <span>Backend URL</span>
+        <div class="range-row">
+          <input id="backend-url" type="text" placeholder="https://localhost:8000"/>
+          <button id="save-url" class="pick">Save</button>
+        </div>
+      </label>
+      <p class="muted small">Use your deployed API URL (e.g. https://your-app.onrender.com) so the add-in works on any machine.</p>
+    </div>
+  </details>
+
+  <main>
+    <!-- 1. Data selection ------------------------------------------------ -->
+    <section class="card">
+      <div class="step-label">1 · Select data</div>
+
+      <label class="field">
+        <span>Y (outcome, 0/1)</span>
+        <div class="range-row">
+          <input id="y-range" type="text" placeholder="e.g. Sheet1!E2:E301"/>
+          <button class="pick" data-target="y-range" title="Use current selection">Use&nbsp;selection</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span>X (features)</span>
+        <div class="range-row">
+          <input id="x-range" type="text" placeholder="e.g. Sheet1!A2:D301"/>
+          <button class="pick" data-target="x-range" title="Use current selection">Use&nbsp;selection</button>
+        </div>
+      </label>
+
+      <label class="check">
+        <input id="has-header" type="checkbox" checked/>
+        <span>First row of each range is a header (label)</span>
+      </label>
+      <div id="data-preview" class="preview hidden" aria-live="polite"></div>
+    </section>
+
+    <!-- 2. Options -------------------------------------------------------- -->
+    <section class="card">
+      <div class="step-label">2 · Options</div>
+      <label class="check">
+        <input id="standardize" type="checkbox" checked/>
+        <span>Standardise features (recommended)</span>
+      </label>
+      <label class="field-inline">
+        <span>Test split</span>
+        <input id="test-size" type="range" min="0" max="0.5" step="0.05" value="0.3"/>
+        <b id="test-size-out">30%</b>
+      </label>
+      <label class="field-inline">
+        <span>Regularisation C</span>
+        <input id="reg-c" type="number" min="0.01" step="0.1" value="1.0"/>
+      </label>
+      <label class="check">
+        <input id="balance" type="checkbox"/>
+        <span>Balance classes (for imbalanced data)</span>
+      </label>
+      <label class="check">
+        <input id="cv" type="checkbox"/>
+        <span>5-fold cross-validation (more honest metrics)</span>
+      </label>
+      <button id="run-btn" class="primary">Run model</button>
+    </section>
+
+    <!-- 3. Results -------------------------------------------------------- -->
+    <section id="results" class="hidden">
+      <div class="step-label">3 · Results <span id="eval-note" class="muted"></span></div>
+
+      <div class="metric-grid">
+        <div class="metric"><span>Accuracy @ 0.50</span><b id="m-acc">–</b></div>
+        <div class="metric"><span>AUC</span><b id="m-auc">–</b></div>
+        <div class="metric"><span>Precision @ 0.50</span><b id="m-prec">–</b></div>
+        <div class="metric"><span>Recall @ 0.50</span><b id="m-rec">–</b></div>
+      </div>
+      <p id="eval-warning" class="notice hidden"></p>
+      <p id="cv-note" class="muted small hidden"></p>
+      <p id="quality-note" class="muted small"></p>
+
+      <h2>Coefficients</h2>
+      <div class="table-wrap">
+        <table id="coef-table">
+          <thead>
+            <tr><th>Feature</th><th>Coef</th><th>Odds</th><th>p-value</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="inference-note" class="muted small"></p>
+
+      <h2>Feature effect</h2>
+      <div class="chart-box"><canvas id="coef-chart"></canvas></div>
+
+      <h2>ROC curve <span id="auc-inline" class="muted"></span></h2>
+      <div class="chart-box"><canvas id="roc-chart"></canvas></div>
+
+      <h2>Confusion matrix</h2>
+      <div class="field-inline">
+        <span>Threshold</span>
+        <input id="threshold" type="range" min="0.05" max="0.95" step="0.01" value="0.5"/>
+        <b id="threshold-out">0.50</b>
+      </div>
+      <p id="thr-suggest" class="muted small"></p>
+      <div id="confusion" class="confusion"></div>
+      <div class="metric-grid small-metrics">
+        <div class="metric"><span>Accuracy @thr</span><b id="t-acc">–</b></div>
+        <div class="metric"><span>Precision @thr</span><b id="t-prec">–</b></div>
+        <div class="metric"><span>Recall @thr</span><b id="t-rec">–</b></div>
+        <div class="metric"><span>F1 @thr</span><b id="t-f1">–</b></div>
+      </div>
+
+      <h2>Apply</h2>
+      <button id="writeback-btn" class="secondary" disabled>Export report to new sheet</button>
+      <p class="muted small">Creates a new worksheet with settings, metrics, coefficients, and source-row predictions. The source worksheet is never overwritten.</p>
+
+      <h2>What-if predictor</h2>
+      <div id="whatif-inputs"></div>
+      <button id="whatif-btn" class="secondary" disabled>Predict</button>
+      <div id="whatif-result" class="whatif-result hidden"></div>
+
+      <h2>Predict new rows</h2>
+      <label class="field">
+        <span>X range for new rows</span>
+        <div class="range-row">
+          <input id="new-x-range" type="text" placeholder="e.g. new_customers!A1:I20"/>
+          <button class="pick" data-target="new-x-range" title="Use current selection">Use&nbsp;selection</button>
+        </div>
+      </label>
+      <label class="check">
+        <input id="new-has-header" type="checkbox" checked/>
+        <span>New rows include the trained feature headers in the same order</span>
+      </label>
+      <button id="score-new-btn" class="secondary" disabled>Score new rows</button>
+      <button id="export-new-btn" class="secondary hidden" disabled>Export new-row predictions</button>
+      <p id="new-score-note" class="muted small"></p>
+    </section>
+  </main>
+
+  <div id="error-toast" class="toast hidden"></div>
+
+  <script src="taskpane.js"></script>
+</body>
+</html>

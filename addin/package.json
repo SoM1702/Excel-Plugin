@@ -1,0 +1,19 @@
+{
+  "name": "excel-logistic-regression-addin",
+  "version": "0.1.0",
+  "description": "Office.js task-pane add-in for logistic regression, backed by a Python + scikit-learn service.",
+  "private": true,
+  "scripts": {
+    "cert": "office-addin-dev-certs install",
+    "start": "node dev-server.js",
+    "sideload": "office-addin-debugging start manifest.xml desktop",
+    "stop": "office-addin-debugging stop manifest.xml",
+    "validate": "office-addin-manifest validate manifest.xml",
+    "test": "node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "office-addin-debugging": "^6.0.0",
+    "office-addin-dev-certs": "^1.13.0",
+    "office-addin-manifest": "^1.13.0"
+  }
+}

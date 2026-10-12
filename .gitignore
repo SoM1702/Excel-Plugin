@@ -1,0 +1,15 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Node
+addin/node_modules/
+
+# Generated
+backend/sample_data.csv
+backend/*_evaluation.json
+addin/manifest.prod.xml
+
+# OS
+.DS_Store
