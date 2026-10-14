@@ -1,181 +1,195 @@
-# Excel Logistic Regression Add-in
+# Excel Logistic Regression Add-in (Scratch Engine)
 
-This project adds binary logistic regression to Excel. Select numeric feature
-columns and one two-class outcome column, then train a Python
-scikit-learn model from an Excel task pane.
+This project integrates binary logistic regression into Microsoft Excel from
+scratch. Select numeric feature columns ($X$) and one binary outcome column ($Y$)
+in your spreadsheet, then train a model using our pure NumPy full-batch gradient
+descent engine with zero machine-learning library dependencies.
 
-The add-in shows fixed-threshold metrics, AUC, a ROC curve, coefficients,
-odds ratios, qualified p-values, and an interactive confusion matrix. It can
-score a hypothetical row or a new Excel range without retraining. It exports
-each result to a new report worksheet, so it does not overwrite the source
-sheet.
+The add-in displays:
+- **Dual Mode (Table Mode & Numeric Mode)**:
+  - **Table Mode (Default)**: Select any raw rectangular Excel table with headers (e.g., the untouched Seaborn Titanic dataset). Automatically profiles columns, infers types (numeric, boolean, categorical), flags potential target leakage (e.g., `alive` vs `survived`), enables non-adjacent feature selection, and fits scratch models without requiring numeric helper sheets.
+  - **Numeric Mode**: Legacy workflow for pre-engineered, adjacent numeric matrices ($X$) and binary outcome columns ($Y$).
+- **Zero-Leakage Scratch Preprocessing**:
+  - Imputes missing numeric values using training-partition medians (or complete-case drop).
+  - Encodes low-cardinality categoricals into $k-1$ dummy indicators with documented reference levels and unknown/missing category fallbacks.
+  - Preprocessing parameters are learned strictly on training rows; cross-validation folds independently fit their own scratch preprocessors.
+- **Flexible range selection**: Supports cell addresses (`churn_data!A1:I401`, `$A$1:$I$401`) and Excel defined names (`CustomerFeatures`, `ChurnOutcome`, `NewCustomers`, worksheet-local names, or explicit `'Sheet'!Name`).
+- **Deterministic scope resolution**: Displays a resolution preview showing name scope and resolved absolute cells before fitting or scoring.
+- **Snapshot protection**: Verifies named range definitions, dimensions, and cell values before report export; prevents stale or redirected exports.
+- **Training diagnostics**: Convergence status, gradient norm, iteration count, initial and final loss.
+- **Bounded training-loss curve**: Real-time Chart.js visualization of binary cross-entropy vs iteration.
+- **Model parameters**: Learned weights ($w$), intercept ($b$), and exponentiated odds ratios.
+- **Performance evaluation**: Fixed 0.50 metrics, training majority-class baseline, log loss, Brier score, ROC curve, and tied-score AUC on held-out test data.
+- **Linked partition controls**: Synchronized Train % and Test % numeric fields with slider and row allocation preview.
+- **Interactive threshold tuning**: Live confusion matrix, precision, recall, and F1 updates.
+- **What-if calculator & Raw Table scoring**: Score single hypothetical inputs (with raw dropdowns for categorical features) or raw workbook sheets with reordered columns using the active model pipeline.
+- **Excel report export**: Writes settings, parameters, loss history, metrics, and source-row predictions (with train/test partition tags) to a new worksheet without modifying source data.
+
+---
 
 ## Architecture
 
-    Excel task pane
-      Office.js reads checked X and Y ranges
-      JavaScript sends HTTPS JSON requests
+```text
+    Excel Task Pane (Office.js + Vanilla CSS + Chart.js)
+      Reads table or numeric inputs via shared resolver (cell addresses or defined named ranges)
+      Profiles schema, detects leakage, allows non-adjacent column selection
+      Displays resolution summary and multirow sample preview
+      Sends HTTPS JSON payload with scratch settings (alpha, iters, tol, lambda)
                 |
                 v
-    FastAPI service
-      validates data and trains scikit-learn LogisticRegression
-      returns metrics, model ID, coefficients, probabilities, and warnings
+    FastAPI Service (backend/)
+      TablePreprocessorScratch: train-only median imputation & dummy encoding
+      StandardScalerScratch: fits means and population scales on training data only
+      train_test_split_scratch: seeded stratified split with exact complement rounding
+      LogisticRegressionScratch: pure NumPy sigmoid, BCE, and full-batch gradient descent
+      metrics.py: confusion matrix, log loss, ROC, and tied-score AUC
                 |
                 v
-    Excel task pane
-      charts results, explores a threshold, scores new rows, exports report
+    Excel Task Pane
+      Renders training loss curve, ROC curve, coefficients bar chart, and metrics
+      Allows threshold exploration, single-row what-if prediction, and report export
+```
 
-Office add-ins run in a web view and cannot execute Python directly. The
-task pane therefore handles spreadsheet interaction and presentation, while
-the Python service handles validation, training, and statistics.
+---
 
-## What the current version protects against
+## Core Mathematical Equations
 
-- Exactly one outcome column is required. X and Y must be aligned, on the
-  same worksheet, and must not overlap.
-- Feature values must be finite numbers. Headers must be nonblank and unique.
-- The UI shows a preview of row count, features, classes, and constant-column
-  warnings before training.
-- The model uses a held-out stratified test split when requested. It does not
-  silently replace that with training-set evaluation.
-- A suggested F1 threshold comes only from cross-validation inside the
-  training portion. The final test set stays separate.
-- The active threshold is used consistently by the live matrix, what-if
-  prediction, new-row prediction, and report export.
-- Results belong to one source snapshot and one model ID. Changed data or
-  settings require retraining before export or prediction.
+The learning engine implements the handwritten mathematical equations from the mentor review:
 
-## Project layout
+1. **Linear Score (Logit):**
+   $$z_i = \sum_{j=1}^d w_j x_{ij} + b = \mathbf{w}^T \mathbf{x}_i + b$$
+2. **Sigmoid Probability:**
+   $$p_i = \sigma(z_i) = \frac{1}{1 + e^{-z_i}}$$
+3. **Training Objective (Binary Cross-Entropy):**
+   $$J(\mathbf{w}, b) = -\frac{1}{m} \sum_{i=1}^m \left[ y_i \ln(p_i) + (1 - y_i) \ln(1 - p_i) \right] + \frac{\lambda}{2} \|\mathbf{w}\|_2^2$$
+4. **Analytical Gradients:**
+   $$\mathbf{d}\mathbf{w} = \frac{1}{m} \mathbf{X}^T (\mathbf{p} - \mathbf{y}) + \lambda \mathbf{w}, \quad db = \frac{1}{m} \sum_{i=1}^m (p_i - y_i)$$
+5. **Simultaneous Parameter Update:**
+   $$\mathbf{w}^{(t+1)} = \mathbf{w}^{(t)} - \alpha \, \mathbf{d}\mathbf{w}^{(t)}, \quad b^{(t+1)} = b^{(t)} - \alpha \, db^{(t)}$$
 
-    sample_data.xlsx                  400-row synthetic churn demo workbook
-    backend/
-      model.py                        validation, training, threshold selection, metrics
-      main.py                         FastAPI routes: health, train, predict
-      test_api.py                     readable local or HTTPS smoke test
-      evaluate_real_data.py           reproducible public-data benchmark
-      tests/test_model.py             backend regression tests
-      make_sample_data.py             creates the synthetic Excel and CSV demo
-      make_loan_data.py               creates an alternate loan-default CSV
-      requirements.txt
-      Dockerfile
-    addin/
-      manifest.xml                    tells Excel how to load the add-in
-      dev-server.js                   local HTTPS static-file server
-      src/taskpane/                   HTML, CSS, Office.js, charts, interactions
-      tests/taskpane.test.js          browser-logic tests
-    docs/EVALUATION.md                benchmark methodology and limitations
-    TESTED_VERSIONS.md                verified local dependency versions
+Detailed derivations, numerical stability proofs, and a worked arithmetic example are provided in [`docs/LOGISTIC_REGRESSION_EQUATIONS.md`](file:///Users/nan/Documents/SEM5/MINI_PROJECT/excel-logistic-regression-addin/docs/LOGISTIC_REGRESSION_EQUATIONS.md).
 
-## Run locally
+---
 
-Prerequisites: Python 3.11 or newer, Node 18 or newer, and Microsoft Excel.
+## Project Structure
 
-Start the task pane:
+```text
+sample_data.xlsx                  400-row synthetic customer churn workbook
+docs/
+  LOGISTIC_REGRESSION_EQUATIONS.md Formal mathematical derivations, dimensions, and proofs
+  EVALUATION.md                   Benchmark methodology and software checks
+backend/
+  logistic_scratch.py             Pure NumPy stable sigmoid, BCE loss, gradients, and GD fit loop
+  table_schema.py                 Table profiling, type inference, leakage detection, and schemas
+  table_preprocessing.py          Pure NumPy TablePreprocessorScratch (train-only median/mode & dummy encoding)
+  preprocessing.py                Pure NumPy StandardScalerScratch and constant feature checks
+  splitting.py                    Seeded stratified train/test split and StratifiedKFoldScratch
+  metrics.py                      Confusion matrix, accuracy, precision, recall, F1, AUC, log loss
+  model.py                        Training and evaluation coordinator (numeric and table pipelines)
+  main.py                         FastAPI service (/health, /train, /predict, /profile-table, /train-table, /predict-table)
+  test_api.py                     Local and HTTP smoke test script
+  evaluate_real_data.py           Reproducible local CSV benchmark (breast cancer dataset)
+  breast_cancer.csv               Local 569-row benchmark dataset
+  tests/                          Complete test suite (81 unit and integration tests)
+addin/
+  manifest.xml                    Office add-in XML manifest (ExcelApi 1.4+ requirement)
+  dev-server.js                   Local HTTPS static file server
+  src/taskpane/
+    range-input.js                Shared asynchronous resolver for cell addresses & defined names
+    taskpane.html                 Task pane layout with mode switcher, table preview & column selector
+    taskpane.css                  Responsive task pane stylesheet with resolution and table preview styling
+    taskpane.js                   Data acquisition, Chart.js charts, table preprocessing, diagnostics, export audit
+  tests/
+    range-input.test.js           Unit test suite for range resolution, scopes, syntax, and errors
+    taskpane.test.js              Integration test suite for UI flows, model fitting, and exports (91 tests)
+```
 
-    cd addin
-    npm install
-    npm run cert
-    npm start
+---
 
-The task pane is served at https://localhost:3001. Leave that process running.
+## Running Locally
 
-Start the API in a second terminal:
+### 1. Start the Excel Task Pane
 
-    cd backend
-    python3 -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
-    python make_sample_data.py
-    uvicorn main:app --reload --port 8000 \
-      --ssl-keyfile ~/.office-addin-dev-certs/localhost.key \
-      --ssl-certfile ~/.office-addin-dev-certs/localhost.crt
+```bash
+cd addin
+npm install
+npm run cert   # Installs local HTTPS development certificate
+npm start      # Serves add-in at https://localhost:3001
+```
 
-The API must use HTTPS because an HTTPS Excel task pane cannot call a plain
-HTTP backend. Visit https://localhost:8000/health to confirm it is available.
+### 2. Start the Backend Service
 
-Sideload the development manifest:
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000 \
+  --ssl-keyfile ~/.office-addin-dev-certs/localhost.key \
+  --ssl-certfile ~/.office-addin-dev-certs/localhost.crt
+```
 
-    cd addin
-    npm run sideload
+Check health at `https://localhost:8000/health`.
 
-If sideloading is unavailable on macOS, copy addin/manifest.xml into Excel's
-developer add-in folder, fully quit Excel, and reopen it. The add-in requires
-ReadWriteDocument permission because it reads selected ranges and creates
-report sheets.
+### 3. Sideload the Add-in in Excel
 
-## Demo workflow
+```bash
+cd addin
+npm run sideload
+```
 
-1. Open sample_data.xlsx and the Logistic Regression task pane.
-2. Set X to churn_data!A1:I401 and Y to churn_data!J1:J401.
-3. Leave First row is a header enabled. Review the preview.
-4. Keep standardisation enabled. Use a 30 percent test split. Enable five-fold
-   cross-validation to obtain an independently chosen suggested threshold.
-5. Run the model. Fixed 0.50 metrics, AUC, and training-side CV results
-   answer different questions, so read their labels carefully.
-6. Move the threshold slider to inspect the held-out confusion matrix. This is
-   exploratory after the suggested threshold; changing it updates exports and
-   predictions consistently.
-7. Use Export report to new sheet. The source data is checked first, then a
-   separate worksheet records settings, metrics, coefficients, and predictions.
-8. To score future rows, select a new X range with the same feature headers
-   and ordering, then use Score new rows and Export new-row predictions.
+Or copy `addin/manifest.xml` into your Office developer folder (`~/Library/Containers/com.microsoft.Excel/Data/Documents/wef` on macOS).
 
-## How the model is evaluated
+---
 
-With a nonzero test split, the data is split once into outer training and test
-portions. Standardisation is fitted on training data only. If cross-validation
-is enabled, each fold fits its own scaler and classifier. Out-of-fold
-probabilities from the training portion select an F1 threshold. The final
-model is then evaluated once on the untouched test portion.
+## Running Tests
 
-The UI distinguishes:
+- **Backend Python Suite (81 unit and integration tests):**
+  ```bash
+  PYTHONPATH=backend python3 -m unittest discover -s backend/tests
+  ```
+- **Frontend JavaScript Suite (91 unit and integration tests):**
+  ```bash
+  npm --prefix addin test
+  ```
+- **Local Smoke Test:**
+  ```bash
+  PYTHONPATH=backend python3 backend/test_api.py
+  ```
+- **Local Real-Data Benchmark:**
+  ```bash
+  PYTHONPATH=backend python3 backend/evaluate_real_data.py
+  ```
+- **Manifest Validation:**
+  ```bash
+  npm --prefix addin run validate
+  ```
+- **Local Smoke Test:**
+  ```bash
+  PYTHONPATH=backend python3 backend/test_api.py
+  ```
+- **Local Real-Data Benchmark:**
+  ```bash
+  PYTHONPATH=backend python3 backend/evaluate_real_data.py
+  ```
+- **Manifest Validation:**
+  ```bash
+  npm --prefix addin run validate
+  ```
 
-- Metrics at 0.50: the normal fixed classification rule.
-- Metrics at the active threshold: useful for the displayed confusion matrix
-  and exported classes.
-- AUC: threshold-independent ranking performance.
-- Cross-validation: variation across training-side folds.
+---
 
-The sample churn workbook is synthetic and validates the end-to-end product
-flow. It does not prove real-world performance. See docs/EVALUATION.md for a
-separate reproducible public-data benchmark and its limitations.
+## Workload Limits & Production Guardrails
 
-## Tests
+| Subsystem / Operation | Policy / Limit | Technical Rationale & Behavior |
+|---|---|---|
+| **Range Selection Preflight** | 500,000 cells max per range ($X$ or $Y$) | Geometry (`rowCount`, `columnCount`, `worksheet.id`) is verified in Stage 1 without requesting values. Ranges $>500,000$ cells are rejected immediately before loading values into Office.js memory. |
+| **High-Dimensional Support** | Up to 12,288 features supported | Under the 500,000-cell budget, a 12,288-feature dataset accommodates 39 usable data rows plus 1 header row ($12,288 \times 40 = 491,520$ cells). |
+| **Parameter Table UI** | 50 features per page + search filter | Prevents DOM bloat and UI freezing when navigating models with hundreds or thousands of features. Preserves true feature indexing ($w_{i+1}$) across search filters. |
+| **What-If Calculator** | $\le 25$ features for interactive manual inputs | Models with $>25$ features disable manual what-if inputs with a clear guidance note, directing users to the batch New X scoring workflow. |
+| **Excel Export Batching** | 250 rows, 10,000 cells, or 1 MiB per batch block | Reports and tables write in dynamically chunked batches bounded by rows ($\le 250$), cells ($\le 10,000$), and estimated UTF-8 serialized bytes ($\le 1$ MiB), executing an explicit `await context.sync()` per batch to bound queued Office.js host memory. Wide rows exceeding cell budgets are dynamically segmented across column blocks. |
+| **Excel Cell Text Limits** | Exact identity preservation up to 32,767 chars | Feature names, class labels, and identity fields are preserved exactly up to Excel's 32,767 character-per-cell limit; text exceeding 32,767 characters raises an explicit validation error rather than being silently truncated. Descriptive text, previews, and warnings are wrapped or shortened cleanly via `prepareDescription`. |
+| **Formula Bounds** | $\le 500$ features for horizontal Excel formulas | Excel horizontal recalculation formulas are omitted for models $>500$ features (retaining complete vertical parameter specification tables and batch predictions). |
+| **Export Concurrency Protection** | Immutable export tokens | Checked after every asynchronous step (`sourceStillMatches`, `addUniqueWorksheet`, each batch chunk, and immediately after final `await context.sync()`). Exports abort if training settings, models, or thresholds change, and interrupted sheets are marked `[STALE EXPORT - CANCELLED: ...]` or `[INCOMPLETE EXPORT - CANCELLED: ...]`. Status-marker failures are surfaced without swallowing the original error. |
+| **New X Input Revisions** | Per-field selection and scoring revisions | Guarantees that typing, checkbox toggles, or out-of-order and obsolete "Use selection" reads/failures do not invalidate newer predictions or display irrelevant error messages. |
 
-Run backend tests:
-
-    cd backend
-    .venv/bin/python -m unittest discover -s tests -v
-    .venv/bin/python test_api.py
-
-Run task-pane logic tests:
-
-    cd addin
-    npm test
-    node --check src/taskpane/taskpane.js
-
-The manifest validation command also exists:
-
-    npm run validate
-
-It contacts Microsoft's online validation service, so it needs network access.
-
-## Interpretation and limits
-
-Logistic regression estimates:
-
-    probability = 1 / (1 + exp(-(b0 + b1*x1 + ... + bn*xn)))
-
-Positive coefficients raise the estimated odds of the encoded positive class;
-negative coefficients lower them. An odds ratio is exp(coefficient). When
-standardisation is enabled, a feature coefficient refers roughly to a
-one-standard-deviation increase.
-
-P-values are approximate Wald-style values calculated from an unregularised
-information matrix while the classifier uses L2 regularisation. The UI hides
-them when balanced class weights make that calculation unsupported. They show
-association, not causation.
-
-This version supports numeric features and exactly two outcome classes. It
-does not yet handle missing data, categorical encoding, multiclass outcomes,
-per-user persistent models, authentication, or production CORS restrictions.

@@ -1,7 +1,7 @@
 {
   "name": "excel-logistic-regression-addin",
   "version": "0.1.0",
-  "description": "Office.js task-pane add-in for logistic regression, backed by a Python + scikit-learn service.",
+  "description": "Office.js task-pane add-in for binary logistic regression from scratch using pure NumPy full-batch gradient descent.",
   "private": true,
   "scripts": {
     "cert": "office-addin-dev-certs install",

@@ -10,8 +10,8 @@
   <Version>1.0.0.0</Version>
   <ProviderName>Your Team Name</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-  <DisplayName DefaultValue="Logistic Regression (ML)"/>
-  <Description DefaultValue="Fit a logistic regression classifier on your Excel data using a Python + scikit-learn backend, with metrics and visualisations."/>
+  <DisplayName DefaultValue="Logistic Regression (Scratch)"/>
+  <Description DefaultValue="Fit a logistic regression classifier from scratch on your Excel data using full-batch gradient descent, with explainable metrics, diagnostics, and visualisations."/>
   <IconUrl DefaultValue="https://localhost:3001/assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="https://localhost:3001/assets/icon-80.png"/>
   <SupportUrl DefaultValue="https://localhost:3001"/>
@@ -19,6 +19,12 @@
   <Hosts>
     <Host Name="Workbook"/>
   </Hosts>
+
+  <Requirements>
+    <Sets DefaultMinVersion="1.4">
+      <Set Name="ExcelApi" MinVersion="1.4"/>
+    </Sets>
+  </Requirements>
 
   <DefaultSettings>
     <SourceLocation DefaultValue="https://localhost:3001/src/taskpane/taskpane.html"/>

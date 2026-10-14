@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Logistic Regression</title>
+  <title>Logistic Regression (Scratch Engine)</title>
 
   <!-- Office.js: required, must come from Microsoft's CDN -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-  <!-- Chart.js for the ROC curve and coefficient chart -->
+  <!-- Chart.js for ROC curve, coefficient chart, and training loss curve -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 
   <link rel="stylesheet" href="taskpane.css"/>
@@ -15,7 +15,7 @@
 <body>
   <header class="app-header">
     <span class="dot"></span>
-    <h1>Logistic regression</h1>
+    <h1>Logistic regression <span class="badge-tag">Scratch</span></h1>
   </header>
 
   <!-- Backend status banner -->
@@ -23,8 +23,7 @@
     Checking backend connection…
   </div>
 
-  <!-- Backend URL is configurable at runtime so the SAME add-in works against
-       a local server (dev) or a deployed cloud API (demo) with no rebuild. -->
+  <!-- Backend URL settings -->
   <details class="settings">
     <summary>Backend settings</summary>
     <div class="settings-body">
@@ -35,69 +34,194 @@
           <button id="save-url" class="pick">Save</button>
         </div>
       </label>
-      <p class="muted small">Use your deployed API URL (e.g. https://your-app.onrender.com) so the add-in works on any machine.</p>
+      <p class="muted small">Local dev: https://localhost:8000 · Cloud API: your deployed HTTPS endpoint.</p>
     </div>
   </details>
 
   <main>
-    <!-- 1. Data selection ------------------------------------------------ -->
+    <!-- 1. Data selection -->
     <section class="card">
       <div class="step-label">1 · Select data</div>
 
-      <label class="field">
-        <span>Y (outcome, 0/1)</span>
-        <div class="range-row">
-          <input id="y-range" type="text" placeholder="e.g. Sheet1!E2:E301"/>
-          <button class="pick" data-target="y-range" title="Use current selection">Use&nbsp;selection</button>
-        </div>
-      </label>
+      <!-- Mode Switcher -->
+      <div class="mode-toggle">
+        <button type="button" id="mode-table-btn" class="mode-btn active">Table mode (recommended)</button>
+        <button type="button" id="mode-numeric-btn" class="mode-btn">Numeric X/Y mode</button>
+      </div>
 
-      <label class="field">
-        <span>X (features)</span>
-        <div class="range-row">
-          <input id="x-range" type="text" placeholder="e.g. Sheet1!A2:D301"/>
-          <button class="pick" data-target="x-range" title="Use current selection">Use&nbsp;selection</button>
-        </div>
-      </label>
+      <!-- Table Mode Container -->
+      <div id="table-mode-container">
+        <label class="field">
+          <span>Table range or Excel named range · Rectangular table with headers</span>
+          <div class="range-row">
+            <input id="table-range" type="text" placeholder="TitanicTable or Sheet1!A1:O892"/>
+            <button class="pick" data-target="table-range" title="Use current selection">Use&nbsp;selection</button>
+          </div>
+        </label>
+        <button type="button" id="profile-table-btn" class="secondary" style="margin-top: 2px; margin-bottom: 8px;">Inspect table columns</button>
 
-      <label class="check">
-        <input id="has-header" type="checkbox" checked/>
-        <span>First row of each range is a header (label)</span>
-      </label>
-      <div id="data-preview" class="preview hidden" aria-live="polite"></div>
+        <div id="table-profile-card" class="table-profile-card hidden">
+          <div id="table-summary-info" class="table-meta-summary"></div>
+
+          <label class="field">
+            <span>Outcome column (Y · binary classification target)</span>
+            <select id="table-y-select" class="form-select"></select>
+          </label>
+
+          <label class="field">
+            <span>Missing values policy</span>
+            <select id="table-missing-policy" class="form-select">
+              <option value="impute" selected>Impute missing values (median for numeric, dedicated missing bucket for categories)</option>
+              <option value="drop_rows">Complete cases only (drop rows with missing cells)</option>
+            </select>
+          </label>
+
+          <div style="margin-top: 10px;">
+            <div style="font-weight: 600; font-size: 11px; color: var(--muted); margin-bottom: 4px;">Features (X) · Select columns to include</div>
+            <div class="table-col-toolbar">
+              <button type="button" id="table-select-all-suggested" class="btn btn-tiny">Select all suggested</button>
+              <button type="button" id="table-select-clear" class="btn btn-tiny">Clear</button>
+              <span id="table-selected-count" class="muted tiny">0 features selected</span>
+            </div>
+            <div id="table-columns-list" class="table-columns-list"></div>
+            <div id="table-projected-summary" class="muted tiny" style="margin-top: 4px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Numeric Range Mode Container (Legacy) -->
+      <div id="numeric-mode-container" class="hidden">
+        <label class="field">
+          <span>Y (outcome, 0/1) · Cell range or Excel named range</span>
+          <div class="range-row">
+            <input id="y-range" type="text" placeholder="ChurnOutcome or churn_data!J1:J401"/>
+            <button class="pick" data-target="y-range" title="Use current selection">Use&nbsp;selection</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>X (features) · Cell range or Excel named range</span>
+          <div class="range-row">
+            <input id="x-range" type="text" placeholder="CustomerFeatures or churn_data!A1:I401"/>
+            <button class="pick" data-target="x-range" title="Use current selection">Use&nbsp;selection</button>
+          </div>
+        </label>
+        <p class="muted tiny range-help">
+          Tip: Create names in Excel using the <strong>Name Box</strong> or <strong>Formulas &gt; Name Manager</strong>. Workbook scope is recommended for simplest use across sheets.
+        </p>
+
+        <label class="check">
+          <input id="has-header" type="checkbox" checked/>
+          <span>First row of each range is a header (label)</span>
+        </label>
+        <div id="data-preview" class="preview hidden" aria-live="polite"></div>
+      </div>
     </section>
 
-    <!-- 2. Options -------------------------------------------------------- -->
+    <!-- 2. Options -->
     <section class="card">
-      <div class="step-label">2 · Options</div>
+      <div class="step-label">2 · Training options</div>
       <label class="check">
         <input id="standardize" type="checkbox" checked/>
-        <span>Standardise features (recommended)</span>
+        <span>Standardise features (recommended for gradient descent)</span>
       </label>
-      <label class="field-inline">
-        <span>Test split</span>
-        <input id="test-size" type="range" min="0" max="0.5" step="0.05" value="0.3"/>
-        <b id="test-size-out">30%</b>
-      </label>
-      <label class="field-inline">
-        <span>Regularisation C</span>
-        <input id="reg-c" type="number" min="0.01" step="0.1" value="1.0"/>
-      </label>
-      <label class="check">
-        <input id="balance" type="checkbox"/>
-        <span>Balance classes (for imbalanced data)</span>
-      </label>
-      <label class="check">
+
+      <!-- Linked Train % / Test % Split Controls -->
+      <div class="split-box">
+        <div class="split-header">
+          <span>Train / Test partition</span>
+          <b id="split-summary-badge">70% / 30%</b>
+        </div>
+        <div class="split-inputs-row">
+          <label class="percent-input-wrap">
+            <span>Train %</span>
+            <input id="train-pct" type="number" min="20" max="95" step="1" value="70"/>
+          </label>
+          <label class="percent-input-wrap">
+            <span>Test %</span>
+            <input id="test-pct" type="number" min="5" max="80" step="1" value="30"/>
+          </label>
+        </div>
+        <input id="test-size" type="range" min="0.05" max="0.80" step="0.01" value="0.30"/>
+        <div id="allocation-counts" class="allocation-text">
+          Row counts preview: Train 280 rows (70%), Test 120 rows (30%) for N=400.
+        </div>
+      </div>
+
+      <!-- Advanced Settings Collapsible -->
+      <details class="advanced-box" id="advanced-details">
+        <summary>Advanced gradient descent parameters</summary>
+        <div class="advanced-body">
+          <div class="field-row">
+            <label class="field-half">
+              <span>Learning rate (&alpha;)</span>
+              <input id="learning-rate" type="number" min="0.001" max="10" step="0.01" value="0.1"/>
+            </label>
+            <label class="field-half">
+              <span>Max iterations</span>
+              <input id="max-iter" type="number" min="50" max="50000" step="500" value="10000"/>
+            </label>
+          </div>
+
+          <div class="field-row">
+            <label class="field-half">
+              <span>Tolerance (&epsilon;)</span>
+              <input id="tolerance" type="number" min="0.0000001" max="0.01" step="0.000001" value="0.000001"/>
+            </label>
+            <label class="field-half">
+              <span>L2 penalty (&lambda;)</span>
+              <input id="l2-lambda" type="number" min="0" max="1000" step="0.05" value="0"/>
+            </label>
+          </div>
+
+          <label class="check">
+            <input id="balance" type="checkbox"/>
+            <span>Balance class weights (s<sub>i</sub> = m / (2&middot;n<sub>c</sub>))</span>
+          </label>
+          <p class="muted tiny">Adjusts cross-entropy loss so minority and majority classes have equal effective weight.</p>
+        </div>
+      </details>
+
+      <label class="check" style="margin-top: 8px;">
         <input id="cv" type="checkbox"/>
-        <span>5-fold cross-validation (more honest metrics)</span>
+        <span>5-fold cross-validation on training split (for threshold tuning)</span>
       </label>
-      <button id="run-btn" class="primary">Run model</button>
+
+      <button id="run-btn" class="primary">Fit scratch model</button>
     </section>
 
-    <!-- 3. Results -------------------------------------------------------- -->
+    <!-- 3. Results -->
     <section id="results" class="hidden">
-      <div class="step-label">3 · Results <span id="eval-note" class="muted"></span></div>
+      <div class="step-label">3 · Results &amp; diagnostics <span id="eval-note" class="muted"></span></div>
 
+      <!-- Table Metadata & Preparation Summary (Shown in Table Mode) -->
+      <div id="table-results-summary" class="resolution-box hidden">
+        <div style="font-weight: 600; margin-bottom: 4px;">Table preparation &amp; encoding summary</div>
+        <div id="table-results-rows-info" class="small"></div>
+        <div id="table-results-encodings-info" class="tiny muted" style="margin-top: 4px;"></div>
+      </div>
+
+      <!-- Diagnostics Banner -->
+      <div id="diag-banner" class="diag-banner">
+        <div class="diag-header">
+          <span id="diag-status-badge" class="status-badge">Converged</span>
+          <span id="diag-method" class="muted small">Full-batch gradient descent</span>
+        </div>
+        <div class="diag-metrics-grid">
+          <div><span>Initial loss</span><b id="d-init-loss">–</b></div>
+          <div><span>Final loss</span><b id="d-final-loss">–</b></div>
+          <div><span>Iterations</span><b id="d-iters">–</b></div>
+          <div><span>Grad norm</span><b id="d-grad-norm">–</b></div>
+        </div>
+        <p id="diag-stop-reason" class="muted tiny"></p>
+      </div>
+
+      <!-- Training Loss Curve -->
+      <h2>Training loss curve <span class="muted small">(Cross-entropy vs iteration)</span></h2>
+      <div class="chart-box"><canvas id="loss-chart"></canvas></div>
+
+      <!-- Test Metrics Grid -->
+      <h2>Held-out test performance</h2>
       <div class="metric-grid">
         <div class="metric"><span>Accuracy @ 0.50</span><b id="m-acc">–</b></div>
         <div class="metric"><span>AUC</span><b id="m-auc">–</b></div>
@@ -108,24 +232,67 @@
       <p id="cv-note" class="muted small hidden"></p>
       <p id="quality-note" class="muted small"></p>
 
-      <h2>Coefficients</h2>
+      <h2>Learned model equation &amp; parameters</h2>
+      <div id="equation-card" class="equation-card">
+        <div class="eq-row">
+          <span class="eq-badge">Linear score z</span>
+          <code id="eq-score-text">z = w₁·x₁ + ... + b</code>
+        </div>
+        <div class="eq-row">
+          <span class="eq-badge">Probability p</span>
+          <code id="eq-sigmoid-text">p = σ(z) = 1 / (1 + e⁻ᶻ)</code>
+        </div>
+        <div class="eq-row">
+          <span class="eq-badge">Decision rule</span>
+          <span id="eq-decision-text" class="small">Class = 1 if p ≥ threshold, else 0</span>
+        </div>
+        <p id="eq-unit-note" class="muted tiny"></p>
+      </div>
+
+      <div class="params-nav-bar">
+        <input type="text" id="params-search" placeholder="Search features..." class="params-search-input">
+        <div id="params-pagination" class="pagination-bar hidden">
+          <button type="button" id="params-prev-btn" class="btn btn-tiny" disabled>&laquo; Prev</button>
+          <span id="params-page-info" class="tiny muted">Page 1 of 1</span>
+          <button type="button" id="params-next-btn" class="btn btn-tiny" disabled>Next &raquo;</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table id="params-table">
+          <thead>
+            <tr>
+              <th>Param</th>
+              <th>Feature</th>
+              <th>Model weight</th>
+              <th>Original-unit weight</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="param-interp-note" class="muted tiny">
+        Model-space weights apply to standardised features (per std dev). Original-unit weights apply directly to raw Excel values. Parameters express statistical associations, not causal effects.
+      </p>
+
+      <h2>Coefficients &amp; odds ratios</h2>
       <div class="table-wrap">
         <table id="coef-table">
           <thead>
-            <tr><th>Feature</th><th>Coef</th><th>Odds</th><th>p-value</th></tr>
+            <tr><th>Feature</th><th>Weight w</th><th>Odds ratio</th><th>p-value</th></tr>
           </thead>
           <tbody></tbody>
         </table>
       </div>
       <p id="inference-note" class="muted small"></p>
 
-      <h2>Feature effect</h2>
+      <h2>Feature effect (Weights)</h2>
       <div class="chart-box"><canvas id="coef-chart"></canvas></div>
 
       <h2>ROC curve <span id="auc-inline" class="muted"></span></h2>
       <div class="chart-box"><canvas id="roc-chart"></canvas></div>
 
-      <h2>Confusion matrix</h2>
+      <h2>Decision threshold tuning</h2>
       <div class="field-inline">
         <span>Threshold</span>
         <input id="threshold" type="range" min="0.05" max="0.95" step="0.01" value="0.5"/>
@@ -140,20 +307,56 @@
         <div class="metric"><span>F1 @thr</span><b id="t-f1">–</b></div>
       </div>
 
-      <h2>Apply</h2>
-      <button id="writeback-btn" class="secondary" disabled>Export report to new sheet</button>
-      <p class="muted small">Creates a new worksheet with settings, metrics, coefficients, and source-row predictions. The source worksheet is never overwritten.</p>
+      <!-- Mathematical Equations Card -->
+      <details class="math-card">
+        <summary>Mathematical equations reference</summary>
+        <div class="math-body">
+          <p><strong>1. Logit:</strong> <code>z = &sum; w<sub>j</sub>&middot;x<sub>j</sub> + b</code></p>
+          <p><strong>2. Sigmoid:</strong> <code>p = &sigma;(z) = 1 / (1 + e<sup>-z</sup>)</code></p>
+          <p><strong>3. Cross-entropy:</strong> <code>J = -(1/m) &sum; [y ln(p) + (1-y) ln(1-p)]</code></p>
+          <p><strong>4. Gradients:</strong> <code>dw = (1/m) X<sup>T</sup>(p - y), &nbsp; db = (1/m) &sum;(p - y)</code></p>
+          <p><strong>5. Update:</strong> <code>w &larr; w - &alpha;&middot;dw, &nbsp; b &larr; b - &alpha;&middot;db</code></p>
+          <p class="muted tiny">See <code>docs/LOGISTIC_REGRESSION_EQUATIONS.md</code> for derivations and proofs.</p>
+        </div>
+      </details>
 
-      <h2>What-if predictor</h2>
+      <h2>Export &amp; Apply</h2>
+      <button id="export-weights-btn" class="secondary" disabled>Export model weights</button>
+      <p class="muted small">Exports learned parameters (w, b), means/scales, equations, and a live recalculable Excel formula example (=SUMPRODUCT + IF/EXP) to a dedicated sheet.</p>
+      <button id="writeback-btn" class="secondary" disabled>Export full report to new sheet</button>
+      <p class="muted small">Exports model settings, w/b parameters, training diagnostics, loss history, metrics, and source-row predictions with train/test allocation flags.</p>
+
+      <h2>Single-row what-if calculator</h2>
       <div id="whatif-inputs"></div>
-      <button id="whatif-btn" class="secondary" disabled>Predict</button>
-      <div id="whatif-result" class="whatif-result hidden"></div>
+      <button id="whatif-btn" class="secondary" disabled>Calculate probability</button>
+      <div id="whatif-result" class="whatif-result hidden">
+        <div id="whatif-summary" class="whatif-summary"></div>
+        <div id="whatif-worked-card" class="whatif-worked-card">
+          <div class="step-label" style="margin-top:6px; margin-bottom:4px;">Worked prediction breakdown</div>
+          <div class="table-wrap" style="max-height:160px; margin-bottom:6px;">
+            <table id="whatif-table">
+              <thead>
+                <tr>
+                  <th>Feature</th>
+                  <th>Input x</th>
+                  <th>Scaled x&#770;</th>
+                  <th>Weight w</th>
+                  <th>Contribution</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="whatif-calculation-steps" class="whatif-steps small"></div>
+        </div>
+      </div>
 
-      <h2>Predict new rows</h2>
+
+      <h2>Score new rows</h2>
       <label class="field">
-        <span>X range for new rows</span>
+        <span>X range for new rows · Cell range or Excel named range</span>
         <div class="range-row">
-          <input id="new-x-range" type="text" placeholder="e.g. new_customers!A1:I20"/>
+          <input id="new-x-range" type="text" placeholder="NewCustomers or churn_data!A2:I25"/>
           <button class="pick" data-target="new-x-range" title="Use current selection">Use&nbsp;selection</button>
         </div>
       </label>
@@ -169,6 +372,7 @@
 
   <div id="error-toast" class="toast hidden"></div>
 
+  <script src="range-input.js"></script>
   <script src="taskpane.js"></script>
 </body>
 </html>

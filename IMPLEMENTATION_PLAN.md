@@ -1,6 +1,10 @@
-# Excel Logistic Regression Add-in — Implementation Plan
+# Excel Logistic Regression Add-in — Implementation Plan (Historical Prototype)
 
-Status: implemented locally; awaiting live Excel verification.
+> [!NOTE]
+> This plan documents the initial scikit-learn prototype reliability phase.
+> It has been superseded by [`SCRATCH_IMPLEMENTATION_PLAN.md`](file:///Users/nan/Documents/SEM5/MINI_PROJECT/excel-logistic-regression-addin/SCRATCH_IMPLEMENTATION_PLAN.md), which implements logistic regression completely from scratch using pure NumPy full-batch gradient descent without scikit-learn.
+
+Status: historical prototype record; superseded by scratch implementation plan.
 
 Implemented on 2026-09-08:
 

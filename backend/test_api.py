@@ -4,8 +4,7 @@ Examples:
   python test_api.py
   python test_api.py --url https://localhost:8000
 
-The default uses the engine directly and needs no server. The sample path is
-resolved from this file, so the command works from any current directory.
+The default uses the scratch engine directly and needs no server.
 """
 
 from __future__ import annotations
@@ -20,6 +19,10 @@ from pathlib import Path
 
 def load_sample():
     csv_path = Path(__file__).with_name("sample_data.csv")
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"Test fixture {csv_path} not found. Tests must not regenerate or overwrite the workbook."
+        )
     with csv_path.open(newline="") as source:
         rows = list(csv.reader(source))
     header = rows[0]
@@ -29,15 +32,29 @@ def load_sample():
 
 def display(result):
     evaluation = result["evaluation"]
+    split = result["split"]
+    diag = result.get("diagnostics", {})
     print(
-        f"\nSamples: {result['n_samples']}   Features: {result['n_features']}   "
-        f"Evaluation: {evaluation['mode']} (train {evaluation['n_train']}, test {evaluation['n_test']})"
+        f"\nEngine: {result.get('engine', 'scratch')} ({result.get('method', 'Full-batch gradient descent')})"
     )
+    print(
+        f"Samples: {result['n_samples']}   Features: {result['n_features']}   "
+        f"Allocation: Train {split['n_train']} ({split['actual_train_percent']}%), Test {split['n_test']} ({split['actual_test_percent']}%)"
+    )
+    if diag:
+        status_str = "Converged" if diag.get("converged") else "Not converged"
+        grad_norm_str = f"{diag['gradient_norm']:.2e}" if diag.get("gradient_norm") is not None else "n/a"
+        print(
+            f"Diagnostics: {status_str} in {diag.get('iterations')} iters | "
+            f"Loss: {diag.get('initial_loss', 0):.4f} -> {diag.get('final_loss', 0):.4f} | "
+            f"Grad Norm: {grad_norm_str} | Time: {diag.get('elapsed_seconds', 0)}s"
+        )
+
     metrics = result["metrics"]
     print(
         f"Fixed 0.50 — Accuracy {metrics['accuracy']:.3f} | "
         f"Precision {metrics['precision']:.3f} | Recall {metrics['recall']:.3f} | "
-        f"F1 {metrics['f1']:.3f} | AUC {metrics['auc']:.3f}"
+        f"F1 {metrics['f1']:.3f} | AUC {metrics['auc']:.3f} | Brier {metrics.get('brier_score', 0):.3f}"
     )
     threshold = result["threshold"]
     selected = result["metrics_at_threshold"]
@@ -56,12 +73,11 @@ def display(result):
 
     print("\n  feature                     coef     odds    p-value")
     for coefficient in result["coefficients"]:
-        p_value = "n/a" if coefficient["p_value"] is None else (
-            "<0.001" if coefficient["p_value"] < 0.001 else f"{coefficient['p_value']:.3f}"
-        )
+        p_val = "n/a" if coefficient.get("p_value") is None else f"{coefficient['p_value']:.3f}"
+        odds_str = f"{coefficient['odds_ratio']:6.2f}" if coefficient.get("odds_ratio") is not None else "   inf"
         print(
             f"  {coefficient['name']:<25} {coefficient['coef']:+7.3f}  "
-            f"{coefficient['odds_ratio']:6.2f}   {p_value}"
+            f"{odds_str}   {p_val}"
         )
 
 
@@ -79,7 +95,12 @@ def main():
         "feature_names": feature_names,
         "standardize": True,
         "test_size": 0.3,
+        "learning_rate": 0.1,
+        "max_iterations": 10000,
+        "tolerance": 1e-6,
+        "l2_lambda": 0.0,
         "cv_folds": 5,
+        "random_state": 42,
     }
 
     if args.url:
@@ -101,7 +122,14 @@ def main():
 
         result, _ = train_logistic(**payload)
 
-    json.dumps(result, allow_nan=False)
+    # Smoke assertions
+    rendered = json.dumps(result, allow_nan=False)
+    assert "NaN" not in rendered
+    assert result["metrics"]["accuracy"] > 0.60
+    assert result["metrics"]["auc"] > 0.70
+    assert result["split"]["n_train"] == 280
+    assert result["split"]["n_test"] == 120
+
     display(result)
 
 

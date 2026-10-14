@@ -1,32 +1,30 @@
-# Reproducible evaluation
+# Reproducible Evaluation and Benchmark
 
-The project keeps its synthetic customer-churn workbook as a quick Excel
-integration demo. Its outcome was generated from a known probabilistic rule,
-so its score should not be treated as evidence of real-world performance.
+The project includes both a synthetic customer churn workbook (`sample_data.xlsx`, 400 rows) for Excel integration testing and a reproducible real-world benchmark (`breast_cancer.csv`, 569 rows, 30 features).
 
-For a transparent software benchmark, run:
+## 1. Local Benchmark Execution
 
-    cd backend
-    .venv/bin/python evaluate_real_data.py --output breast_cancer_evaluation.json
+Run the standalone benchmark without external ML library dependencies:
 
-The script uses the Breast Cancer Wisconsin (Diagnostic) dataset bundled with
-scikit-learn. Scikit-learn documents 569 samples, 30 positive real-valued
-features, and two classes; it identifies the upstream UCI source as:
+```bash
+cd backend
+python evaluate_real_data.py --output breast_cancer_evaluation.json
+```
 
-https://archive.ics.uci.edu/dataset/17/breast+cancer+wisconsin+diagnostic
+The benchmark:
+- Loads the public Wisconsin Diagnostic Breast Cancer dataset directly from local `backend/breast_cancer.csv` (UCI Machine Learning Repository, 569 instances, 30 continuous features, binary diagnosis).
+- Uses a fixed seed (42), an authoritative 70/30 stratified train/test split (exact ceiling complement rounding: 171 test rows, 398 train rows).
+- Fits column means and population standard deviations (`ddof=0`) strictly on training rows using `StandardScalerScratch`.
+- Executes 5-fold cross-validation inside the training portion using `StratifiedKFoldScratch` to optimize the F1 decision threshold.
+- Fits the final binary logistic regression model from scratch via full-batch gradient descent (`learning_rate=0.1`, `max_iterations=5000`, `l2_lambda=0.1`).
+- Evaluates test performance on the untouched test partition at both 0.50 and the tuned threshold.
 
-The script uses a fixed random seed of 42, a 70/30 stratified outer
-train/test split, standardisation fitted only on training data, C = 1.0, and
-five-fold stratified cross-validation inside the training portion. It selects
-the F1 threshold from those training-side out-of-fold predictions, then
-reports both 0.50-threshold and selected-threshold metrics on the untouched
-outer test data.
+## 2. Benchmark Findings & Interpretation
 
-The generated JSON records the dataset details, library version, split
-settings, class balance, coefficients, metrics, and threshold source. This is
-a benchmark of the add-in's classification workflow. It is not a medical
-diagnostic system, and the result must not guide clinical decisions.
+The generated JSON file records:
+- **Optimization Diagnostics**: Initial loss, final loss, iteration count, gradient norm, and convergence status.
+- **Classification Performance**: Held-out accuracy, precision, recall, F1, log loss, and tied-score AUC.
+- **Weights & Odds Ratios**: Coefficients learned by full-batch gradient descent.
 
-When presenting it, report the class balance, fixed 0.50 metrics, selected
-threshold, AUC, confusion counts, and cross-validation summary. Do not tune
-the model or threshold on the final test set to improve the reported score.
+> [!NOTE]
+> This benchmark demonstrates software correctness, optimization convergence, and data partition integrity. It is an algorithmic demonstration, not a medical diagnostic tool.

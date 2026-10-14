@@ -1,23 +1,17 @@
-# Tested local versions
+# Tested Local Versions
 
-Recorded on 2026-09-08 in the project virtual environment:
+Recorded for the scratch logistic regression engine:
 
-| Component | Version |
-|---|---:|
-| Python | 3.14.4 |
-| FastAPI | 0.139.0 |
-| Uvicorn | 0.51.0 |
-| scikit-learn | 1.9.0 |
-| NumPy | 2.5.1 |
-| SciPy | 1.18.0 |
-| Pydantic | 2.13.4 |
-| Node.js | 25.9.0 |
-| npm | 11.12.1 |
-| office-addin-debugging | 6.1.2 |
-| office-addin-dev-certs | 1.13.5 |
-| office-addin-manifest | 1.13.6 |
+| Component | Tested Version | Role |
+|---|---:|---|
+| Python | 3.14 | Backend runtime environment |
+| NumPy | 2.5.3 | Array storage, dot products, exponentials, and vectorized operations |
+| FastAPI | 0.142.2 | REST API routing and endpoints |
+| Uvicorn | 0.54.0 | ASGI web server |
+| Pydantic | 2.13.5 | Request schema validation |
+| OpenPyXL | 3.1.5 | Excel spreadsheet reading and generation |
+| Node.js | 25.9.0 | Task-pane development server |
+| Office.js | v1 CDN | Excel JavaScript API host integration |
+| Chart.js | 4.4.1 CDN | Training loss curve, ROC curve, and feature weights rendering |
 
-The Python requirements specify compatible minimum versions rather than
-pinning every dependency. The task-pane package lock records exact Node
-dependency versions. Each exported report also records the runtime Python,
-scikit-learn, NumPy, and SciPy versions used for that model.
+Note: `scikit-learn` and `scipy` are not required by the application or benchmark scripts. All machine learning algorithms (sigmoid, loss, gradients, optimizer, scaling, splitting, CV, metrics) run natively via pure NumPy.

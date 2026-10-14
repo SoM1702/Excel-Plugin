@@ -1,20 +1,18 @@
 """Reproduce one transparent benchmark on a public binary-classification dataset.
 
 This is a benchmark for the software workflow, not a medical model or a claim
-that the add-in is ready for clinical use. The data is bundled with
-scikit-learn, so running this script does not download data or modify files
-unless --output is supplied.
+that the add-in is ready for clinical use. The benchmark loads from the local
+breast_cancer.csv dataset (569 rows, 30 features) and runs our scratch logistic
+regression engine with zero external ML dependencies.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-
-import sklearn
-from sklearn.datasets import load_breast_cancer
 
 from model import train_logistic
 
@@ -22,15 +20,34 @@ from model import train_logistic
 SOURCE_URL = "https://archive.ics.uci.edu/dataset/17/breast+cancer+wisconsin+diagnostic"
 
 
+def load_dataset():
+    csv_path = Path(__file__).with_name("breast_cancer.csv")
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Benchmark dataset not found at {csv_path}")
+
+    with csv_path.open(newline="") as f:
+        reader = list(csv.reader(f))
+
+    headers = reader[0]
+    feature_names = headers[:-1]
+    rows = [[float(v) for v in row] for row in reader[1:]]
+    features = [row[:-1] for row in rows]
+    labels = [int(row[-1]) for row in rows]
+    return feature_names, features, labels
+
+
 def evaluate():
-    dataset = load_breast_cancer()
+    feature_names, features, labels = load_dataset()
     result, _ = train_logistic(
-        features=dataset.data.tolist(),
-        labels=dataset.target.tolist(),
-        feature_names=dataset.feature_names.tolist(),
+        features=features,
+        labels=labels,
+        feature_names=feature_names,
         standardize=True,
         test_size=0.3,
-        C=1.0,
+        learning_rate=0.1,
+        max_iterations=5000,
+        tolerance=1e-5,
+        l2_lambda=0.1,
         class_weight=None,
         cv_folds=5,
         random_state=42,
@@ -39,13 +56,12 @@ def evaluate():
         "benchmark": {
             "name": "Breast Cancer Wisconsin (Diagnostic)",
             "source": SOURCE_URL,
-            "loaded_from": "scikit-learn built-in load_breast_cancer dataset",
+            "loaded_from": "local breast_cancer.csv",
             "purpose": "reproducible binary-classification software benchmark",
             "not_for": "clinical diagnosis, treatment, or deployment decisions",
-            "samples": int(dataset.data.shape[0]),
-            "features": int(dataset.data.shape[1]),
-            "target_names": dataset.target_names.tolist(),
-            "scikit_learn_version": sklearn.__version__,
+            "samples": len(labels),
+            "features": len(feature_names),
+            "engine": "scratch_full_batch_gradient_descent",
             "run_at_utc": datetime.now(timezone.utc).isoformat(),
         },
         "result": result,

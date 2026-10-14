@@ -1,5 +1,5 @@
 # Portable backend: builds the same everywhere, so the API runs on any machine
-# or free cloud host without anyone installing Python or scikit-learn locally.
+# or cloud host using our pure NumPy scratch logistic regression engine.
 FROM python:3.12-slim
 
 WORKDIR /app

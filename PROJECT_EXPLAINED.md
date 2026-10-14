@@ -1,157 +1,136 @@
-# Excel Logistic Regression Add-in: current implementation
+# Excel Logistic Regression Add-in: Architecture and Implementation Guide
 
-## Problem
+## 1. Problem and Objective
 
-Excel users can easily store historical business data, but standard Excel
-tools do not provide a guided logistic-regression workflow for a two-class
-outcome. This project lets a user choose numeric predictor columns and one
-outcome column in Excel, fit a logistic regression model, inspect its quality,
-and score future rows.
+Excel is widely used for business and tabular data, but lacks built-in guided tools for binary classification modeling. This project provides a full-featured Office.js task pane add-in that enables users to select predictor features ($X$) and a binary outcome ($Y$), fit a logistic regression model from scratch, inspect training diagnostics and held-out metrics, and score hypothetical or future rows.
 
-Examples include churn or no churn, loan default or no default, and fraud or
-normal transaction. The project is a classification-analysis tool; its
-probabilities support decisions but do not prove a cause.
+Per faculty mentor specifications, the model is implemented completely from scratch using pure NumPy:
+- Standard logistic sigmoid function
+- Binary cross-entropy loss objective (negative log-likelihood)
+- Analytical vector gradients
+- Full-batch gradient descent with step-halving stability safeguard
+- Seeded stratified train/test partitioning with exact complement rounding
+- Pure NumPy feature standardization and classification metrics
 
-## Product flow
+No library optimizers or machine learning frameworks (such as scikit-learn or statsmodels) are used for learning.
 
-    1. User selects aligned X feature columns and one Y outcome column.
-    2. Office.js reads the worksheet values and validates the selection.
-    3. The task pane sends HTTPS JSON to the Python service.
-    4. FastAPI validates the request and calls the ML engine.
-    5. scikit-learn fits logistic regression and the engine returns results.
-    6. The task pane renders metrics, charts, and a threshold explorer.
-    7. The user can score a hypothetical row, score a new Excel range, or
-       export a report to a separate worksheet.
+---
 
-The source sheet is not modified by export. Before export, the add-in rereads
-the selected ranges and blocks output when the source changed after training.
+## 2. System Architecture
 
-## Architecture
+```text
+  Excel Task Pane (Office.js + Vanilla CSS + Chart.js)
+    1. Resolves X and Y ranges/names via range-input.js (cell addresses or Excel defined names)
+    2. Validates non-empty, finite numeric inputs and unique headers
+    3. Displays resolution summary and multirow data preview with constant-feature warnings
+    4. Provides synchronized Train % / Test % inputs with allocation preview
+    5. Dispatches HTTPS JSON requests to the backend service
+               |
+               v
+  Python Backend (FastAPI + NumPy)
+    backend/logistic_scratch.py: Sigmoid, BCE loss, analytical gradients, GD fit loop
+    backend/preprocessing.py: StandardScalerScratch (ddof=0 population variance)
+    backend/splitting.py: Seeded stratified split & StratifiedKFoldScratch
+    backend/metrics.py: Confusion counts, accuracy, precision, recall, F1, log loss, AUC
+    backend/model.py: Training coordinator, fold CV, optimal F1 threshold tuning
+    backend/main.py: REST endpoints (/health, /train, /predict)
+               |
+               v
+  Excel Task Pane
+    6. Displays training diagnostics (convergence status, loss, gradient norm)
+    7. Plots training loss curve and ROC curve using Chart.js
+    8. Allows interactive threshold tuning and single-row what-if prediction
+    9. Re-verifies source snapshot and exports full audit report to a new Excel worksheet
+```
 
-    Excel task pane                         Python backend
-    HTML, CSS, JavaScript                   FastAPI, NumPy, SciPy, scikit-learn
-    Office.js reads and writes workbook     validates and trains the classifier
-    Chart.js renders results                returns JSON results and model ID
-                 \                         /
-                  \----- HTTPS JSON -------/
+---
 
-The split is intentional. An Office add-in runs in an embedded browser and
-uses JavaScript to interact with a workbook. It cannot execute Python
-libraries directly. The browser client therefore handles the user interface
-and Excel operations; Python handles numerical computation and validation.
+## 3. Mathematical Equations Implemented
 
-## Logistic regression
+The engine translates the mentor's handwritten review equations into vectorized algorithms:
 
-The model first forms a weighted score:
+1. **Linear Score (Logit):**
+   $$z_i = \sum_{j=1}^d w_j x_{ij} + b = \mathbf{w}^T \mathbf{x}_i + b$$
+2. **Sigmoid Probability:**
+   $$p_i = \sigma(z_i) = \frac{1}{1 + e^{-z_i}}$$
+3. **Cost Function (Binary Cross-Entropy):**
+   $$J(\mathbf{w}, b) = -\frac{1}{m} \sum_{i=1}^m \left[ y_i \ln(p_i) + (1 - y_i) \ln(1 - p_i) \right] + \frac{\lambda}{2} \|\mathbf{w}\|_2^2$$
+4. **Analytical Gradients:**
+   $$\mathbf{d}\mathbf{w} = \frac{1}{m} \mathbf{X}^T (\mathbf{p} - \mathbf{y}) + \lambda \mathbf{w}$$
+   $$db = \frac{1}{m} \sum_{i=1}^m (p_i - y_i)$$
+5. **Simultaneous Update:**
+   $$\mathbf{w}^{(t+1)} = \mathbf{w}^{(t)} - \alpha \, \mathbf{d}\mathbf{w}^{(t)}, \quad b^{(t+1)} = b^{(t)} - \alpha \, db^{(t)}$$
 
-    z = b0 + b1*x1 + b2*x2 + ... + bn*xn
+---
 
-It then converts that score to a probability:
+## 4. Evaluation and Threshold Optimization
 
-    p = 1 / (1 + exp(-z))
+1. **Outer Stratified Train/Test Split:**
+   The test fraction is chosen by the user (5% to 80%, default 30%). Training fraction is its exact complement ($1 - \text{test\_fraction}$).
+   Row counts follow exact ceiling rounding: $n_{\text{test}} = \lceil N \cdot \text{test\_fraction} \rceil$, $n_{\text{train}} = N - n_{\text{test}}$.
+2. **Threshold Tuning on Training Folds:**
+   When 5-fold cross-validation is enabled, out-of-fold training predictions are evaluated across a candidate threshold grid ($0.05$ to $0.95$) to find the threshold maximizing F1.
+3. **Uncontaminated Final Evaluation:**
+   Held-out test rows are evaluated only once at threshold 0.50 and at the suggested threshold. Test rows are never seen during parameter fitting or threshold selection.
 
-The probability is converted into a class using:
+---
 
-    predicted class = 1 when p is at least the active threshold
+## 5. Main Code Files and Responsibilities
 
-The normal threshold is 0.50. A lower threshold catches more positive cases
-but can create more false positives. A higher threshold reduces false alarms
-but can miss positives.
-
-## Evaluation design
-
-The current version avoids using final test data to choose the suggested
-threshold.
-
-    Outer train/test split
-      Training portion
-        stratified cross-validation
-        scaler fit separately inside every fold
-        out-of-fold probabilities choose max-F1 threshold
-      Final model fit on the full outer training portion
-      Final test portion evaluates 0.50 and suggested threshold once
-
-Cross-validation is optional. If it is disabled or cannot be performed
-because a class has too few training examples, the project uses 0.50 and says
-why. It never silently replaces a requested test split with training scores.
-
-The results have four distinct meanings:
-
-| Result | Meaning |
+| File | Primary Responsibility |
 |---|---|
-| Accuracy, precision, recall, F1 at 0.50 | Performance at the standard classification rule |
-| Active-threshold matrix | Current false-positive and false-negative trade-off |
-| AUC and ROC curve | Ranking quality across thresholds |
-| Training-side CV | Stability across folds and source of suggested threshold |
+| `addin/src/taskpane/range-input.js` | Shared asynchronous resolver for cell addresses, defined names, scope inspection, and snapshot re-verification |
+| `backend/logistic_scratch.py` | Stable sigmoid, BCE loss directly from logit, analytical gradients, gradient descent fit loop |
+| `backend/preprocessing.py` | Feature standardization fit on training rows only, constant-feature detection |
+| `backend/splitting.py` | Seeded stratified train/test partitioning and StratifiedKFold index generator |
+| `backend/metrics.py` | Confusion counts, accuracy, precision, recall, F1, log loss, ROC curve, tied-score AUC |
+| `backend/model.py` | Training coordinator, threshold tuning, and JSON report compilation |
+| `backend/main.py` | FastAPI endpoints, Pydantic schemas, active model ID tracking |
+| `docs/LOGISTIC_REGRESSION_EQUATIONS.md` | Formal mathematical derivations, dimensional analysis, and worked arithmetic example |
+| `addin/src/taskpane/taskpane.html` | UI layout: linked split controls, diagnostics banner, loss chart canvas, equation card, and named range guidance |
+| `addin/src/taskpane/taskpane.js` | Office.js Excel data read/write, synchronized controls, Chart.js rendering, report export |
+| `addin/src/taskpane/taskpane.css` | Modern styling optimized for the Excel task pane with resolution preview styles |
+| `addin/tests/range-input.test.js` | Unit tests for address parsing, scope precedence, and snapshot alteration checks |
+| `addin/tests/taskpane.test.js` | Integration tests for task pane UI lifecycle, training, scoring, and export verification |
 
-## Main code responsibilities
+---
 
-| File | Responsibility |
-|---|---|
-| backend/model.py | Validation, split, standardisation, fitting, CV, threshold selection, metrics, coefficient rows |
-| backend/main.py | HTTP request schemas, health, train, predict, model-ID checks |
-| backend/test_api.py | Readable local or HTTPS smoke test |
-| backend/evaluate_real_data.py | Reproducible public-data software benchmark |
-| addin/src/taskpane/taskpane.js | Excel reads, UI state, safe output, API calls, charts, new-row scoring |
-| addin/src/taskpane/taskpane.html | Task-pane controls and result areas |
-| addin/src/taskpane/taskpane.css | Layout and visual treatment |
-| addin/manifest.xml | Excel host, permissions, icons, ribbon command, task-pane URL |
-| addin/dev-server.js | Local HTTPS static server |
+## 6. Model Parameters, Dual Feature Spaces, and What-If Inference
 
-## Data validation
+### 6.1 Dual Feature Space Parameters
+To provide complete transparency between optimization theory and real-world business interpretability, every fitted model produces exact parameters in two spaces:
+1. **Model Space ($\mathbf{w}_{\text{model}}, b_{\text{model}}$)**: The direct parameters learned by gradient descent on normalized data ($\tilde{x}_j = (x_j - \mu_j) / \sigma_j$).
+2. **Original-Unit Space ($\mathbf{w}_{\text{orig}}, b_{\text{orig}}$)**: Exact algebraic closed-form converted parameters that operate directly on raw unscaled user inputs:
+   $$w_{\text{orig}, j} = \frac{w_{\text{model}, j}}{\sigma_j}, \quad b_{\text{orig}} = b_{\text{model}} - \sum_{j=1}^d \frac{w_{\text{model}, j} \cdot \mu_j}{\sigma_j}$$
+Both parameterizations evaluate to the exact same logit $z$ within $10^{-12}$ precision.
 
-Before a model request, the add-in requires:
+### 6.2 Parameter Tables and Concrete Equation Display
+In the task pane's **Model Parameters & Mathematical Equations** card:
+- Explicit Intercept ($b$) row and feature weight rows ($w_1, \dots, w_d$) are rendered with full precision.
+- A concrete numerical equation is shown for models with $\le 10$ features (e.g. $z = -0.0654 \cdot x_1 + 0.0032 \cdot x_2 + 0.8123$), while a compact summation notation $z = \sum (w_j \cdot x_j) + b$ is displayed for large feature counts ($d > 10$).
 
-- one Y column and one or more X columns;
-- X and Y from the same worksheet, with identical starting rows and counts;
-- no X/Y overlap;
-- numeric, finite feature cells;
-- nonblank, unique headers when headers are enabled;
-- exactly two nonblank outcome classes.
+### 6.3 Interactive Single-Row What-If Breakdown
+The task pane provides a single-row **What-If Calculator** allowing users to enter custom predictor values and trace the complete arithmetic chain:
+1. **Feature-by-Feature Table**: Shows raw value $x_j$, standardized value $\tilde{x}_j$, weight $w_j$, and signed contribution $w_j \tilde{x}_j$.
+2. **Step-by-Step Breakdown Card**:
+   - Step 1: Sum of feature contributions $\sum w_j \tilde{x}_j$
+   - Step 2: Learned bias $b$
+   - Step 3: Linear logit $z = \sum + b$
+   - Step 4: Sigmoid probability $p = \sigma(z)$
+   - Step 5: Decision rule comparison against active threshold $\tau$
+3. **Threshold Reactivity**: Moving the threshold slider immediately updates the decision rule and predicted class without modifying weights, scores, or probabilities. Editing input fields immediately clears the explanation until recalculated.
 
-The backend repeats important validation because a browser client is not a
-security boundary. It also checks C, test split, fold count, feature shape,
-finite values, and class counts.
+---
 
-## Reports and predictions
+## 7. Dedicated Model Weights Export & Excel Recalculation
 
-Every training result receives a model ID. The Python service stores one
-active model in memory for this single-user prototype. A backend restart or a
-new training request invalidates older model IDs.
+In addition to the comprehensive training report, users can click **Export model weights** to export a standalone model audit sheet into Excel:
+- **Unique Timestamped Sheet**: Automatically named `Model Weights YYYYMMDDHHMMSS` without modifying or overwriting any existing sheet.
+- **Model Metadata**: Algorithm identification, model ID, training timestamp, sample size, feature space, convergence status, iterations, loss, and class mapping.
+- **Complete Parameter Specification**: Full precision weights and intercept in both model-space and original units, alongside feature means and scales.
+- **Recalculable Excel Example**: Exports an example row with inputs and weights placed in matching horizontal dimensions, enabling live Excel formula recalculation:
+  - Linear score: `=SUMPRODUCT(inputs, weights) + bias_cell`
+  - Stable probability: `=IF(score_cell>=0, 1/(1+EXP(-score_cell)), EXP(score_cell)/(1+EXP(score_cell)))`
+  - Decision: `=IF(prob_cell>=threshold_cell, 1, 0)`
+- **Snapshot Safety**: Re-verifies source ranges and defined names before exporting to ensure the model matches active spreadsheet state.
 
-The report export creates a new worksheet that contains:
-
-- source ranges, timestamp, model ID, class mapping, and settings;
-- fixed-0.50 and active-threshold metrics;
-- CV and inference notes;
-- coefficient table;
-- source row number, probability, encoded class, and displayed class label.
-
-New rows must have the trained headers in exactly the same order. They are
-scored with the fitted scaler and classifier, never fitted again. Their output
-also goes into a separate worksheet.
-
-## Statistical interpretation
-
-Positive coefficients increase the model's estimated odds of the encoded
-positive class; negative coefficients decrease them. The odds ratio is
-exp(coefficient), so a ratio above one multiplies odds upward.
-
-With standardisation enabled, a coefficient means a roughly one-standard-
-deviation feature change. With it disabled, it means one original feature
-unit. Coefficients describe association while other selected features are held
-constant; they do not establish causation.
-
-The project shows approximate Wald p-values only for unweighted models. The
-classifier uses L2 regularisation, so these values are qualified estimates,
-not exact unregularised inference. When balanced class weights are used, the
-p-values are hidden rather than presented as reliable.
-
-## Current limits
-
-The prototype accepts numeric features and two outcome classes. It does not
-yet encode categories, impute missing data, support multiclass models, retain
-separate models for several users, authenticate callers, or restrict CORS for
-a production deployment. The synthetic churn workbook demonstrates product
-integration, while docs/EVALUATION.md describes a reproducible public-data
-benchmark. Neither result authorizes a real-world high-stakes decision.
