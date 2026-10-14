@@ -448,6 +448,175 @@ class TestTableAPI(unittest.TestCase):
         coef_names = [c["name"] for c in data["coefficients"] if c["name"] != "Intercept"]
         self.assertEqual(data["feature_names"], coef_names)
 
+    def test_train_and_predict_table_unseen_missing_and_literal_missing(self):
+        """Train categorical feature with no blanks, score reference, blank, unseen, and literal _missing_."""
+        train_rows = [
+            [1, "C", 20.0],
+            [0, "S", 30.0],
+            [1, "C", 40.0],
+            [0, "S", 50.0],
+            [1, "C", 25.0],
+            [0, "S", 35.0],
+            [1, "C", 45.0],
+            [0, "S", 55.0],
+            [1, "C", 60.0],
+            [0, "S", 65.0],
+        ]
+        status, train_data = asyncio.run(
+            asgi_call(
+                "POST",
+                "/train-table",
+                {
+                    "headers": ["y", "embarked", "age"],
+                    "rows": train_rows,
+                    "y_column": 0,
+                    "selected_x_columns": [1, 2],
+                    "max_iterations": 50,
+                },
+            )
+        )
+        self.assertEqual(status, 200)
+        model_id = train_data["model_id"]
+        # Both embarked=S and embarked=_missing_ must be generated feature names
+        self.assertIn("embarked=_missing_", train_data["feature_names"])
+
+        # Score 4 distinct rows
+        test_rows = [
+            ["C", 30.0],          # 1. Reference category
+            ["", 30.0],           # 2. Blank cell
+            ["Q", 30.0],          # 3. Unseen category
+            ["_missing_", 30.0],  # 4. Literal category text "_missing_"
+        ]
+        pred_status, pred_data = asyncio.run(
+            asgi_call(
+                "POST",
+                "/predict-table",
+                {
+                    "model_id": model_id,
+                    "headers": ["embarked", "age"],
+                    "rows": test_rows,
+                },
+            )
+        )
+        self.assertEqual(pred_status, 200)
+        results = pred_data["results"]
+        self.assertEqual(len(results), 4)
+
+        # Probabilities exist and are valid numbers
+        for r in results:
+            self.assertTrue(0.0 <= r["prob"] <= 1.0)
+
+        # Warnings should record 'Q' and '_missing_' as unseen, but NOT 'C' or blank
+        warnings_str = " ".join(pred_data.get("warnings", []))
+        self.assertIn("embarked='Q'", warnings_str)
+        self.assertIn("embarked='_missing_'", warnings_str)
+        self.assertNotIn("embarked='C'", warnings_str)
+
+    def test_validation_errors_report_exact_excel_row_in_train_heldout_and_cv(self):
+        """Validation errors in train, held-out test, and CV folds report the real Excel row."""
+        # Table starts at row 10 (headers at row 10, data rows at 11..30)
+        base_rows = [
+            [i % 2, float(i + 10), i % 2 == 1]
+            for i in range(20)
+        ]
+
+        # Case 1: Place invalid numeric string at row 23 (data row index 12: 10 + 1 + 12 = 23)
+        rows_train_err = [list(r) for r in base_rows]
+        rows_train_err[12][1] = "bad_numeric_val"
+
+        # Fit with cv_folds=0, test_size=0.3
+        status1, data1 = asyncio.run(
+            asgi_call(
+                "POST",
+                "/train-table",
+                {
+                    "headers": ["y", "numeric_feat", "bool_feat"],
+                    "rows": rows_train_err,
+                    "y_column": 0,
+                    "selected_x_columns": [1, 2],
+                    "start_row": 10,
+                    "cv_folds": 0,
+                    "random_state": 42,
+                },
+            )
+        )
+        self.assertEqual(status1, 400)
+        self.assertIn("row 23", data1["detail"])
+        self.assertIn("numeric_feat", data1["detail"])
+
+        # Case 2: Place invalid value at row 17 (data row index 6: 10 + 1 + 6 = 17) with CV enabled
+        rows_cv_err = [list(r) for r in base_rows]
+        rows_cv_err[6][1] = "bad_numeric_cv"
+
+        status2, data2 = asyncio.run(
+            asgi_call(
+                "POST",
+                "/train-table",
+                {
+                    "headers": ["y", "numeric_feat", "bool_feat"],
+                    "rows": rows_cv_err,
+                    "y_column": 0,
+                    "selected_x_columns": [1, 2],
+                    "start_row": 10,
+                    "cv_folds": 5,
+                    "random_state": 42,
+                },
+            )
+        )
+        self.assertEqual(status2, 400)
+        self.assertIn("row 17", data2["detail"])
+
+        # Case 3: Place non-boolean value at row 28 (data row index 17: 10 + 1 + 17 = 28)
+        rows_bool_err = [list(r) for r in base_rows]
+        rows_bool_err[17][2] = "not_a_boolean"
+
+        status3, data3 = asyncio.run(
+            asgi_call(
+                "POST",
+                "/train-table",
+                {
+                    "headers": ["y", "numeric_feat", "bool_feat"],
+                    "rows": rows_bool_err,
+                    "y_column": 0,
+                    "selected_x_columns": [1, 2],
+                    "start_row": 10,
+                    "cv_folds": 0,
+                },
+            )
+        )
+        self.assertEqual(status3, 400)
+        self.assertIn("row 28", data3["detail"])
+        self.assertIn("non-boolean", data3["detail"])
+
+        # Case 4: Missing outcome Y at rows 14 and 25 (data indices 3 and 14)
+        rows_missing_y = [list(r) for r in base_rows]
+        rows_missing_y[3][0] = ""
+        rows_missing_y[14][0] = None
+
+        status4, data4 = asyncio.run(
+            asgi_call(
+                "POST",
+                "/train-table",
+                {
+                    "headers": ["y", "numeric_feat", "bool_feat"],
+                    "rows": rows_missing_y,
+                    "y_column": 0,
+                    "selected_x_columns": [1, 2],
+                    "start_row": 10,
+                    "max_iterations": 50,
+                },
+            )
+        )
+        self.assertEqual(status4, 200)
+        self.assertEqual(data4["table_metadata"]["excluded_missing_y_rows"], [14, 25])
+        # Prediction row numbers start at 11, skip 14 and 25, and end at 30
+        pred_row_nums = data4["predictions"]["row_number"]
+        self.assertNotIn(14, pred_row_nums)
+        self.assertNotIn(25, pred_row_nums)
+        self.assertIn(11, pred_row_nums)
+        self.assertIn(30, pred_row_nums)
+        self.assertEqual(len(pred_row_nums), 18)
+
 
 if __name__ == "__main__":
     unittest.main()

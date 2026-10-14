@@ -78,7 +78,9 @@ class TestTablePreprocessingScratch(unittest.TestCase):
         )
         prep.fit(self.train_rows)
         self.assertEqual(prep.column_specs[0].reference_category, "S")
-        self.assertEqual(prep.column_specs[0].categories, ["C"])
+        self.assertEqual(prep.column_specs[0].categories, ["C", "_missing_"])
+        self.assertNotIn("Q", prep.column_specs[0].categories)
+        self.assertNotIn("UnknownPort", prep.column_specs[0].categories)
 
         # Test rows have 'Q' and 'UnknownPort'
         test_rows = [
@@ -220,6 +222,57 @@ class TestTablePreprocessingScratch(unittest.TestCase):
         X_unseen = prep.transform([["other"]])
         np.testing.assert_array_equal(X_unseen[0], [0.0, 0.0])
         self.assertTrue(any("unseen categories" in w.lower() for w in prep.last_transform_warnings))
+
+    def test_categorical_no_blanks_training_distinguishes_reference_blank_unseen_and_literal_missing(self):
+        """When training has NO blanks, preprocessor still reserves _missing_ indicator and distinguishes all 4 cases."""
+        train_rows = [
+            ["C"],
+            ["C"],
+            ["S"],
+        ]
+        prep = TablePreprocessorScratch(
+            selected_indices=[0],
+            source_headers=["Embarked"],
+        )
+        prep.fit(train_rows)
+
+        # Reference: C (count=2). Categories: S, _missing_
+        self.assertEqual(prep.column_specs[0].reference_category, "C")
+        self.assertEqual(prep.column_specs[0].categories, ["S", "_missing_"])
+        self.assertEqual(prep.generated_feature_names, ["Embarked=S", "Embarked=_missing_"])
+
+        test_rows = [
+            ["C"],           # 1. Reference value -> [0.0, 0.0]
+            [None],          # 2. Blank value -> [0.0, 1.0] (dedicated missing indicator!)
+            ["Q"],           # 3. Unseen value -> [0.0, 0.0] (baseline + unseen warning)
+            ["_missing_"],   # 4. Literal text "_missing_" -> [0.0, 0.0] (unseen warning, NOT missing indicator!)
+        ]
+
+        X_transformed = prep.transform(test_rows)
+
+        # 1. Reference: all zero
+        np.testing.assert_array_equal(X_transformed[0], [0.0, 0.0])
+
+        # 2. Blank: missing indicator is 1.0 (DISTINCT from reference!)
+        np.testing.assert_array_equal(X_transformed[1], [0.0, 1.0])
+
+        # 3. Unseen 'Q': all zero baseline
+        np.testing.assert_array_equal(X_transformed[2], [0.0, 0.0])
+
+        # 4. Literal "_missing_": all zero baseline (never treated as missing cell!)
+        np.testing.assert_array_equal(X_transformed[3], [0.0, 0.0])
+
+        # Warnings should record 'Q' and '_missing_' as unseen categories, but NOT 'C' or blank
+        warnings_text = " ".join(prep.last_transform_warnings)
+        self.assertIn("Embarked='Q'", warnings_text)
+        self.assertIn("Embarked='_missing_'", warnings_text)
+        self.assertNotIn("Embarked='C'", warnings_text)
+
+        # Serialization round-trip preservation
+        serialized = prep.to_dict()
+        reconstituted = TablePreprocessorScratch.from_dict(serialized)
+        X_reconstituted = reconstituted.transform(test_rows)
+        np.testing.assert_array_equal(X_transformed, X_reconstituted)
 
 
 if __name__ == "__main__":

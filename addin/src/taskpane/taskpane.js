@@ -3421,6 +3421,8 @@ async function scoreNewRows() {
             headers: input.headers,
             rows: input.rows,
             threshold: LAST_RESULT._activeThreshold,
+            start_row: (input.source && input.source.firstDataRow != null) ? input.source.firstDataRow : 2,
+            start_col: (input.source && input.source.columnIndex != null) ? input.source.columnIndex + 1 : 1,
           }),
         },
         REQUEST_TIMEOUT_MS,

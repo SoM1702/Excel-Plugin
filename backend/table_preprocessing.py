@@ -97,7 +97,12 @@ class TablePreprocessorScratch:
         # Warnings observed during transform
         self.last_transform_warnings: list[str] = []
 
-    def fit(self, raw_train_rows: list[list[Any]], start_row: int = 2) -> TablePreprocessorScratch:
+    def fit(
+        self,
+        raw_train_rows: list[list[Any]],
+        start_row: int = 2,
+        row_numbers: list[int] | None = None,
+    ) -> TablePreprocessorScratch:
         """Fit preprocessor strictly on the training partition rows."""
         if not raw_train_rows:
             raise ValueError("Cannot fit TablePreprocessorScratch on empty rows.")
@@ -142,7 +147,7 @@ class TablePreprocessorScratch:
             if detected_type == "numeric":
                 num_vals: list[float] = []
                 for r_i, v in enumerate(col_vals):
-                    excel_row = start_row + r_i
+                    excel_row = row_numbers[r_i] if row_numbers is not None and r_i < len(row_numbers) else start_row + r_i
                     if is_missing(v):
                         continue
                     if is_invalid(v):
@@ -171,7 +176,7 @@ class TablePreprocessorScratch:
             elif detected_type == "boolean":
                 bool_vals: list[float] = []
                 for r_i, v in enumerate(col_vals):
-                    excel_row = start_row + r_i
+                    excel_row = row_numbers[r_i] if row_numbers is not None and r_i < len(row_numbers) else start_row + r_i
                     if is_missing(v):
                         continue
                     if is_invalid(v):
@@ -195,7 +200,7 @@ class TablePreprocessorScratch:
                 cat_counts: dict[str, int] = {}
                 missing_count = 0
                 for r_i, v in enumerate(col_vals):
-                    excel_row = start_row + r_i
+                    excel_row = row_numbers[r_i] if row_numbers is not None and r_i < len(row_numbers) else start_row + r_i
                     if is_missing(v):
                         missing_count += 1
                         continue
@@ -204,6 +209,9 @@ class TablePreprocessorScratch:
                             f"Column '{header}' (row {excel_row}) contains invalid error/object cell: {repr(v)}"
                         )
                     clean_cat = str(v).strip()
+                    # Escape literal category text "_missing_" to prevent collision with missing indicator
+                    if clean_cat == "_missing_":
+                        clean_cat = r"\_missing\_"
                     cat_counts[clean_cat] = cat_counts.get(clean_cat, 0) + 1
 
                 if len(cat_counts) > self.category_max_cardinality:
@@ -221,14 +229,10 @@ class TablePreprocessorScratch:
                     spec.impute_value = "_missing_"
                 else:
                     spec.reference_category = sorted_cats[0]
-                    spec.categories = list(sorted_cats[1:])
-                    # If missing values exist in training, reserve explicit missing indicator
-                    if missing_count > 0:
-                        spec.categories.append("_missing_")
-                        spec.all_train_categories = list(sorted_cats) + ["_missing_"]
-                    else:
-                        spec.all_train_categories = list(sorted_cats)
-                    spec.impute_value = "_missing_" if missing_count > 0 else spec.reference_category
+                    # Always reserve distinct missing indicator in active categories, even if training had no blanks
+                    spec.categories = list(sorted_cats[1:]) + ["_missing_"]
+                    spec.all_train_categories = list(sorted_cats) + ["_missing_"]
+                    spec.impute_value = "_missing_"
 
                 generated_for_col: list[str] = []
                 for cat in spec.categories:
@@ -247,7 +251,12 @@ class TablePreprocessorScratch:
         self.is_fitted = True
         return self
 
-    def transform(self, raw_rows: list[list[Any]], start_row: int = 2) -> np.ndarray:
+    def transform(
+        self,
+        raw_rows: list[list[Any]],
+        start_row: int = 2,
+        row_numbers: list[int] | None = None,
+    ) -> np.ndarray:
         """Transform raw heterogeneous rows into a 2D float NumPy matrix using fitted parameters."""
         if not self.is_fitted:
             raise ValueError("TablePreprocessorScratch must be fitted before calling transform.")
@@ -270,19 +279,19 @@ class TablePreprocessorScratch:
                 impute_val = float(spec.impute_value if spec.impute_value is not None else 0.0)
                 for r in range(num_rows):
                     v = col_vals[r]
-                    excel_row = start_row + r
+                    excel_row = row_numbers[r] if row_numbers is not None and r < len(row_numbers) else start_row + r
                     if is_missing(v):
                         output[r, feat_idx] = impute_val
                         imputed_cell_count += 1
                     else:
                         if is_invalid(v):
                             raise ValueError(
-                                f"Column '{spec.source_header}' at row {excel_row} contains invalid cell value: {repr(v)}"
+                                f"Column '{spec.source_header}' (row {excel_row}) contains invalid cell value: {repr(v)}"
                             )
                         pf = try_parse_float(v)
                         if pf is None:
                             raise ValueError(
-                                f"Column '{spec.source_header}' at row {excel_row} contains non-numeric value: {repr(v)}"
+                                f"Column '{spec.source_header}' (row {excel_row}) contains non-numeric value: {repr(v)}"
                             )
                         output[r, feat_idx] = pf
                 feat_idx += 1
@@ -291,19 +300,19 @@ class TablePreprocessorScratch:
                 impute_val = float(spec.impute_value if spec.impute_value is not None else 0.0)
                 for r in range(num_rows):
                     v = col_vals[r]
-                    excel_row = start_row + r
+                    excel_row = row_numbers[r] if row_numbers is not None and r < len(row_numbers) else start_row + r
                     if is_missing(v):
                         output[r, feat_idx] = impute_val
                         imputed_cell_count += 1
                     else:
                         if is_invalid(v):
                             raise ValueError(
-                                f"Column '{spec.source_header}' at row {excel_row} contains invalid cell value: {repr(v)}"
+                                f"Column '{spec.source_header}' (row {excel_row}) contains invalid cell value: {repr(v)}"
                             )
                         bf = to_boolean_float(v)
                         if bf is None:
                             raise ValueError(
-                                f"Column '{spec.source_header}' at row {excel_row} contains non-boolean value: {repr(v)}"
+                                f"Column '{spec.source_header}' (row {excel_row}) contains non-boolean value: {repr(v)}"
                             )
                         output[r, feat_idx] = bf
                 feat_idx += 1
@@ -314,18 +323,18 @@ class TablePreprocessorScratch:
 
                 for r in range(num_rows):
                     v = col_vals[r]
-                    excel_row = start_row + r
+                    excel_row = row_numbers[r] if row_numbers is not None and r < len(row_numbers) else start_row + r
                     if is_missing(v):
                         imputed_cell_count += 1
                         if "_missing_" in cat_to_feat_offset:
                             output[r, feat_idx + cat_to_feat_offset["_missing_"]] = 1.0
-                        # else all indicators 0 (baseline)
                     else:
                         if is_invalid(v):
                             raise ValueError(
-                                f"Column '{spec.source_header}' at row {excel_row} contains invalid error/object cell: {repr(v)}"
+                                f"Column '{spec.source_header}' (row {excel_row}) contains invalid error/object cell: {repr(v)}"
                             )
-                        clean_cat = str(v).strip()
+                        raw_str = str(v).strip()
+                        clean_cat = r"\_missing\_" if raw_str == "_missing_" else raw_str
                         if clean_cat == spec.reference_category:
                             # Reference level: all indicators 0
                             pass
@@ -333,7 +342,7 @@ class TablePreprocessorScratch:
                             output[r, feat_idx + cat_to_feat_offset[clean_cat]] = 1.0
                         else:
                             # Unseen category: all indicators 0 + warning
-                            unseen_categories.add(f"{spec.source_header}='{clean_cat}'")
+                            unseen_categories.add(f"{spec.source_header}='{raw_str}'")
 
                 feat_idx += k_cols
 

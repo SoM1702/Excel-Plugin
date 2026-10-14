@@ -85,7 +85,11 @@ class TrainedModel:
         return z, p
 
     def predict_raw_table(
-        self, headers: list[str], rows: list[list], start_row: int = 2
+        self,
+        headers: list[str],
+        rows: list[list],
+        start_row: int = 2,
+        row_numbers: list[int] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         if self.table_preprocessor is None:
             raise ValueError("This model was trained in numeric mode and cannot score raw tables.")
@@ -128,7 +132,7 @@ class TrainedModel:
                 new_r[sel_idx] = r[mapped_idx] if mapped_idx < len(r) else None
             reordered_rows.append(new_r)
 
-        X_transformed = self.table_preprocessor.transform(reordered_rows, start_row=start_row)
+        X_transformed = self.table_preprocessor.transform(reordered_rows, start_row=start_row, row_numbers=row_numbers)
         scores, probs = self.predict_score_and_proba(X_transformed)
         warnings = list(self.table_preprocessor.last_transform_warnings)
         return scores, probs, warnings
@@ -705,6 +709,7 @@ def _training_table_cv(
     class_weight: str | None,
     standardize: bool,
     random_state: int,
+    train_row_numbers: list[int] | None = None,
 ) -> tuple[dict | None, np.ndarray | None]:
     """Run stratified cross-validation on raw tabular training data without evaluation leakage."""
     if requested_folds == 0:
@@ -743,6 +748,8 @@ def _training_table_cv(
     for fold_idx, (fold_train, fold_valid) in enumerate(kfold.split(dummy_X, y_train), start=1):
         fold_tr_rows = [train_rows[i] for i in fold_train]
         fold_va_rows = [train_rows[i] for i in fold_valid]
+        fold_tr_row_numbers = [train_row_numbers[i] for i in fold_train] if train_row_numbers is not None else None
+        fold_va_row_numbers = [train_row_numbers[i] for i in fold_valid] if train_row_numbers is not None else None
         y_tr = y_train[fold_train]
         y_va = y_train[fold_valid]
 
@@ -755,9 +762,9 @@ def _training_table_cv(
             impute_numeric=impute_numeric,
             category_max_cardinality=category_max_cardinality,
         )
-        fold_prep.fit(fold_tr_rows)
-        X_tr = fold_prep.transform(fold_tr_rows)
-        X_va = fold_prep.transform(fold_va_rows)
+        fold_prep.fit(fold_tr_rows, row_numbers=fold_tr_row_numbers)
+        X_tr = fold_prep.transform(fold_tr_rows, row_numbers=fold_tr_row_numbers)
+        X_va = fold_prep.transform(fold_va_rows, row_numbers=fold_va_row_numbers)
 
         if standardize:
             fold_scaler = StandardScalerScratch().fit(X_tr)
@@ -940,6 +947,8 @@ def train_table_logistic(
     train_indices, test_indices, split_meta = train_test_split_scratch(y, test_size=test_size, random_state=random_state)
     train_rows = [clean_rows[i] for i in train_indices]
     test_rows = [clean_rows[i] for i in test_indices]
+    train_row_numbers = [clean_row_numbers[i] for i in train_indices]
+    test_row_numbers = [clean_row_numbers[i] for i in test_indices]
     y_train = y[train_indices]
     y_test = y[test_indices]
 
@@ -961,6 +970,7 @@ def train_table_logistic(
         class_weight=class_weight,
         standardize=bool(standardize),
         random_state=int(random_state),
+        train_row_numbers=train_row_numbers,
     )
 
     if train_oof_probs is None:
@@ -993,10 +1003,10 @@ def train_table_logistic(
         impute_numeric=impute_numeric,
         category_max_cardinality=category_max_cardinality,
     )
-    preprocessor.fit(train_rows, start_row=data_start_row)
-    X_train = preprocessor.transform(train_rows, start_row=data_start_row)
-    X_test = preprocessor.transform(test_rows, start_row=data_start_row)
-    X_all = preprocessor.transform(clean_rows, start_row=data_start_row)
+    preprocessor.fit(train_rows, start_row=data_start_row, row_numbers=train_row_numbers)
+    X_train = preprocessor.transform(train_rows, start_row=data_start_row, row_numbers=train_row_numbers)
+    X_test = preprocessor.transform(test_rows, start_row=data_start_row, row_numbers=test_row_numbers)
+    X_all = preprocessor.transform(clean_rows, start_row=data_start_row, row_numbers=clean_row_numbers)
 
     names = preprocessor.generated_feature_names
     n_features = len(names)
