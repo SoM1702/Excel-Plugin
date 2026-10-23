@@ -1,4 +1,39 @@
+# Virtual environments and dependencies
 .venv/
+env/
+venv/
+
+# Python bytecode and caches
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local data files and sample datasets
 sample_data.csv
+*.csv
+*.tsv
+*.xlsx
+*.xls
+fixtures/
+outputs/
+
+# Environment files and secrets
+.env*
+*.pem
+*.key
+*.crt
+*.cert
+*.pfx
+
+# Git and repository metadata
+.git/
+.github/
+.gitignore
+
+# Tests and documentation
+tests/
+*.md

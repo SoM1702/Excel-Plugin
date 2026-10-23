@@ -7,7 +7,7 @@ descent engine with zero machine-learning library dependencies.
 
 The add-in displays:
 - **Dual Mode (Table Mode & Numeric Mode)**:
-  - **Table Mode (Default)**: Select any raw rectangular Excel table with headers (e.g., the untouched Seaborn Titanic dataset). Automatically profiles columns, infers types (numeric, boolean, categorical), flags potential target leakage (e.g., `alive` vs `survived`), enables non-adjacent feature selection, and fits scratch models without requiring numeric helper sheets.
+  - **Table Mode (Default)**: Select a raw rectangular Excel table with headers (e.g., the untouched Titanic dataset). Handles supported scalar numeric, boolean, and low-cardinality categorical columns with documented missing/unknown policies (does not handle arbitrary non-scalar Excel objects, nested structures, or image data). Automatically profiles columns, infers types, flags potential target leakage (e.g., `alive` vs `survived`), enables non-adjacent feature selection, and fits scratch models without requiring numeric helper sheets.
   - **Numeric Mode**: Legacy workflow for pre-engineered, adjacent numeric matrices ($X$) and binary outcome columns ($Y$).
 - **Zero-Leakage Scratch Preprocessing**:
   - Imputes missing numeric values using training-partition medians (or complete-case drop).
@@ -67,7 +67,7 @@ The learning engine implements the handwritten mathematical equations from the m
 5. **Simultaneous Parameter Update:**
    $$\mathbf{w}^{(t+1)} = \mathbf{w}^{(t)} - \alpha \, \mathbf{d}\mathbf{w}^{(t)}, \quad b^{(t+1)} = b^{(t)} - \alpha \, db^{(t)}$$
 
-Detailed derivations, numerical stability proofs, and a worked arithmetic example are provided in [`docs/LOGISTIC_REGRESSION_EQUATIONS.md`](file:///Users/nan/Documents/SEM5/MINI_PROJECT/excel-logistic-regression-addin/docs/LOGISTIC_REGRESSION_EQUATIONS.md).
+Detailed derivations, numerical stability proofs, and a worked arithmetic example are provided in [`docs/LOGISTIC_REGRESSION_EQUATIONS.md`](docs/LOGISTIC_REGRESSION_EQUATIONS.md). Evaluation benchmarks and observed live evidence are documented in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ---
 
@@ -78,6 +78,7 @@ sample_data.xlsx                  400-row synthetic customer churn workbook
 docs/
   LOGISTIC_REGRESSION_EQUATIONS.md Formal mathematical derivations, dimensions, and proofs
   EVALUATION.md                   Benchmark methodology and software checks
+MENTOR_PRESENTATION_GUIDE.md      Mentor demo script, checklist, and architectural Q&A
 backend/
   logistic_scratch.py             Pure NumPy stable sigmoid, BCE loss, gradients, and GD fit loop
   table_schema.py                 Table profiling, type inference, leakage detection, and schemas
@@ -90,7 +91,7 @@ backend/
   test_api.py                     Local and HTTP smoke test script
   evaluate_real_data.py           Reproducible local CSV benchmark (breast cancer dataset)
   breast_cancer.csv               Local 569-row benchmark dataset
-  tests/                          Complete test suite (81 unit and integration tests)
+  tests/                          Complete automated Python unit and integration test suite
 addin/
   manifest.xml                    Office add-in XML manifest (ExcelApi 1.4+ requirement)
   dev-server.js                   Local HTTPS static file server
@@ -101,7 +102,7 @@ addin/
     taskpane.js                   Data acquisition, Chart.js charts, table preprocessing, diagnostics, export audit
   tests/
     range-input.test.js           Unit test suite for range resolution, scopes, syntax, and errors
-    taskpane.test.js              Integration test suite for UI flows, model fitting, and exports (91 tests)
+    taskpane.test.js              Integration test suite for UI flows, model fitting, and exports
 ```
 
 ---
@@ -138,41 +139,31 @@ cd addin
 npm run sideload
 ```
 
-Or copy `addin/manifest.xml` into your Office developer folder (`~/Library/Containers/com.microsoft.Excel/Data/Documents/wef` on macOS).
+Or copy `addin/manifest.xml` into your Office developer catalog folder (`~/Library/Containers/com.microsoft.Excel/Data/Documents/wef` on macOS).
 
 ---
 
-## Running Tests
+## Running Automated Tests
 
-- **Backend Python Suite (81 unit and integration tests):**
+Run the full verification suites from the repository root:
+
+- **Backend Python Suite (Unit, Preprocessor, and API Integration Tests):**
   ```bash
-  PYTHONPATH=backend python3 -m unittest discover -s backend/tests
+  PYTHONPATH=backend backend/.venv/bin/python -m unittest discover -s backend/tests
   ```
-- **Frontend JavaScript Suite (91 unit and integration tests):**
+- **Frontend JavaScript Suite (Range Resolver and Task Pane Tests):**
   ```bash
   npm --prefix addin test
   ```
-- **Local Smoke Test:**
+- **Local API Smoke Test:**
   ```bash
-  PYTHONPATH=backend python3 backend/test_api.py
+  PYTHONPATH=backend backend/.venv/bin/python backend/test_api.py
   ```
 - **Local Real-Data Benchmark:**
   ```bash
-  PYTHONPATH=backend python3 backend/evaluate_real_data.py
+  PYTHONPATH=backend backend/.venv/bin/python backend/evaluate_real_data.py
   ```
-- **Manifest Validation:**
-  ```bash
-  npm --prefix addin run validate
-  ```
-- **Local Smoke Test:**
-  ```bash
-  PYTHONPATH=backend python3 backend/test_api.py
-  ```
-- **Local Real-Data Benchmark:**
-  ```bash
-  PYTHONPATH=backend python3 backend/evaluate_real_data.py
-  ```
-- **Manifest Validation:**
+- **Office Add-in Manifest Validation:**
   ```bash
   npm --prefix addin run validate
   ```
@@ -186,7 +177,8 @@ Or copy `addin/manifest.xml` into your Office developer folder (`~/Library/Conta
 | **Range Selection Preflight** | 500,000 cells max per range ($X$ or $Y$) | Geometry (`rowCount`, `columnCount`, `worksheet.id`) is verified in Stage 1 without requesting values. Ranges $>500,000$ cells are rejected immediately before loading values into Office.js memory. |
 | **High-Dimensional Support** | Up to 12,288 features supported | Under the 500,000-cell budget, a 12,288-feature dataset accommodates 39 usable data rows plus 1 header row ($12,288 \times 40 = 491,520$ cells). |
 | **Parameter Table UI** | 50 features per page + search filter | Prevents DOM bloat and UI freezing when navigating models with hundreds or thousands of features. Preserves true feature indexing ($w_{i+1}$) across search filters. |
-| **What-If Calculator** | $\le 25$ features for interactive manual inputs | Models with $>25$ features disable manual what-if inputs with a clear guidance note, directing users to the batch New X scoring workflow. |
+| **What-If Calculator** | $\le 25$ source columns (Table Mode) or $\le 25$ features (Numeric Mode) | Models with $>25$ user input fields disable manual what-if inputs with clear guidance, directing users to the batch *Score new rows* workflow. Generated one-hot categorical dummy features in Table Mode do **not** count against this manual source-column limit. |
+| **Truthful Explanation** | Exact mathematical contribution breakdown | Displays generated features in model order, raw values, scaled values (if standardized), learned weights, and signed contributions $w_j \hat{x}_j$. Verifies that $\sum(w_j \cdot \hat{x}_j) + b = z$ and $\sigma(z) = p$ within $10^{-6}$ tolerance, with data preparation details rendered separately. |
 | **Excel Export Batching** | 250 rows, 10,000 cells, or 1 MiB per batch block | Reports and tables write in dynamically chunked batches bounded by rows ($\le 250$), cells ($\le 10,000$), and estimated UTF-8 serialized bytes ($\le 1$ MiB), executing an explicit `await context.sync()` per batch to bound queued Office.js host memory. Wide rows exceeding cell budgets are dynamically segmented across column blocks. |
 | **Excel Cell Text Limits** | Exact identity preservation up to 32,767 chars | Feature names, class labels, and identity fields are preserved exactly up to Excel's 32,767 character-per-cell limit; text exceeding 32,767 characters raises an explicit validation error rather than being silently truncated. Descriptive text, previews, and warnings are wrapped or shortened cleanly via `prepareDescription`. |
 | **Formula Bounds** | $\le 500$ features for horizontal Excel formulas | Excel horizontal recalculation formulas are omitted for models $>500$ features (retaining complete vertical parameter specification tables and batch predictions). |

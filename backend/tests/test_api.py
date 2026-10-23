@@ -14,7 +14,16 @@ import math
 
 import numpy as np
 
-from main import PredictRequest, TrainRequest, _LAST_MODEL, app, health, predict, train
+from main import (
+    PredictRequest,
+    TrainRequest,
+    _MODEL_REGISTRY,
+    _parse_cors_origins,
+    app,
+    health,
+    predict,
+    train,
+)
 
 
 
@@ -72,7 +81,7 @@ async def asgi_call(method: str, path: str, body: dict | None = None) -> tuple[i
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
-        _LAST_MODEL["model"] = None
+        _MODEL_REGISTRY.clear()
         self.feature_names, self.features, self.labels = load_sample()
 
     def test_health_endpoint(self):
@@ -80,7 +89,24 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["engine"], "scratch")
         self.assertFalse(res["has_model"])
-        self.assertIsNone(res["model_id"])
+        self.assertEqual(res["model_count"], 0)
+
+    def test_cors_defaults_to_local_taskpane_origin_without_wildcard(self):
+        from fastapi.middleware.cors import CORSMiddleware
+
+        cors_config = next(item for item in app.user_middleware if item.cls is CORSMiddleware)
+        self.assertEqual(cors_config.kwargs["allow_origins"], ["https://localhost:3001"])
+        self.assertNotIn("*", cors_config.kwargs["allow_origins"])
+        self.assertEqual(
+            _parse_cors_origins(
+                "https://addin.example.com, https://localhost:3001/, https://ADDIN.example.com:443"
+            ),
+            ["https://addin.example.com", "https://localhost:3001"],
+        )
+        with self.assertRaises(RuntimeError):
+            _parse_cors_origins("https://*.officeapps.live.com")
+        with self.assertRaises(RuntimeError):
+            _parse_cors_origins("https://addin.example.com/taskpane")
 
     def test_prediction_uses_model_id_and_requested_threshold(self):
         trained = train(
@@ -160,7 +186,7 @@ class ApiTests(unittest.TestCase):
         status, data = asyncio.run(asgi_call("POST", "/train", payload))
         self.assertEqual(status, 400)
         self.assertIn("detail", data)
-        self.assertIsNone(_LAST_MODEL["model"])
+        self.assertEqual(len(_MODEL_REGISTRY), 0)
 
     def test_http_asgi_train_and_predict_flow_with_full_precision(self):
         train_payload = {
@@ -173,7 +199,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(train_res["ok"])
         model_id = train_res["model_id"]
-        self.assertIsNotNone(_LAST_MODEL["model"])
+        self.assertIsNotNone(_MODEL_REGISTRY.get(model_id))
 
         # Test predict with 1-row batch
         predict_payload = {
@@ -286,7 +312,7 @@ class ApiTests(unittest.TestCase):
         status, health_res = asyncio.run(asgi_call("GET", "/health"))
         self.assertEqual(status, 200)
         self.assertTrue(health_res["has_model"])
-        self.assertEqual(health_res["model_id"], model_id)
+        self.assertEqual(health_res["model_count"], 1)
 
         # Prediction endpoint should return valid predictions
         predict_payload = {
@@ -315,7 +341,7 @@ class ApiTests(unittest.TestCase):
         }
         status, initial_res = asyncio.run(asgi_call("POST", "/train", train_payload))
         self.assertEqual(status, 200)
-        initial_model = main._LAST_MODEL["model"]
+        initial_model = main._MODEL_REGISTRY.get(initial_res["model_id"])
         self.assertIsNotNone(initial_model)
 
         # Inject a non-finite float (NaN) in the result returned by train_logistic
@@ -329,7 +355,62 @@ class ApiTests(unittest.TestCase):
             status, err_res = asyncio.run(asgi_call("POST", "/train", train_payload))
             self.assertEqual(status, 400)
             # The prior model must NOT have been replaced
-            self.assertIs(main._LAST_MODEL["model"], initial_model)
+            self.assertIs(main._MODEL_REGISTRY.get(initial_res["model_id"]), initial_model)
+
+    def test_registry_keeps_multiple_trained_models_predictable(self):
+        train_payload = {
+            "features": self.features[:50],
+            "labels": self.labels[:50],
+            "feature_names": self.feature_names,
+            "max_iterations": 100,
+        }
+        first = train(TrainRequest(**train_payload))
+        second = train(TrainRequest(**train_payload))
+        self.assertNotEqual(first["model_id"], second["model_id"])
+        self.assertEqual(len(_MODEL_REGISTRY), 2)
+
+        first_prediction = predict(
+            PredictRequest(model_id=first["model_id"], features=[self.features[0]])
+        )
+        second_prediction = predict(
+            PredictRequest(model_id=second["model_id"], features=[self.features[0]])
+        )
+        self.assertEqual(first_prediction["model_id"], first["model_id"])
+        self.assertEqual(second_prediction["model_id"], second["model_id"])
+
+    def test_predict_huge_finite_values_returns_400_and_retains_model(self):
+        """P2 regression: Extreme values that overflow StandardScaler return HTTP 400 and retain usable model."""
+        train_payload = {
+            "features": self.features[:50],
+            "labels": self.labels[:50],
+            "feature_names": self.feature_names,
+            "max_iterations": 50,
+            "standardize": True,
+        }
+        status, train_res = asyncio.run(asgi_call("POST", "/train", train_payload))
+        self.assertEqual(status, 200)
+        model_id = train_res["model_id"]
+
+        # Predict with finite 1e308 that overflows standardization
+        huge_row = [1e308] * len(self.feature_names)
+        predict_payload = {
+            "model_id": model_id,
+            "features": [huge_row],
+        }
+        status, err_res = asyncio.run(asgi_call("POST", "/predict", predict_payload))
+        self.assertEqual(status, 400)
+        self.assertIn("detail", err_res)
+        self.assertIn("supported numerical range", err_res["detail"].lower())
+
+        # Model must still be retained in registry and score normal rows successfully
+        normal_payload = {
+            "model_id": model_id,
+            "features": [self.features[0]],
+        }
+        status, norm_res = asyncio.run(asgi_call("POST", "/predict", normal_payload))
+        self.assertEqual(status, 200)
+        self.assertTrue(norm_res["ok"])
+        self.assertEqual(len(norm_res["results"]), 1)
 
 
 if __name__ == "__main__":

@@ -38,8 +38,31 @@ def is_invalid(val: Any) -> bool:
     return False
 
 
+def normalize_header(header: Any) -> str:
+    """Canonical header identity rule: strip, collapse internal whitespace, and lowercase.
+
+    Used consistently across profiling, training, outcome resolution, prediction, and UI.
+    """
+    if header is None:
+        return ""
+    return re.sub(r"\s+", " ", str(header).strip()).lower()
+
+
 def try_parse_float(val: Any) -> float | None:
-    """Attempt to parse a cell value as float. Returns None if not numeric."""
+    """Attempt to parse a cell value as float. Returns None if not numeric.
+
+    Explicit supported numeric grammar:
+    - Numeric values (int, float) are preserved directly (finite check only; bool rejected).
+    - Strings:
+      - Whitespace is stripped.
+      - Trailing percent: at most one trailing '%' (e.g. '50%', '-12.5%'). If present, divides by 100.0.
+        Strings with repeated or misplaced '%' (e.g. '50%%', '%50', '5%0%') return None.
+      - Currency: at most one supported currency symbol ('$', '€', '£', '¥') either at the start/after leading sign
+        or at the end. Strings with multiple currency symbols (e.g. '$$50') return None.
+      - Signs: at most one leading sign ('+' or '-'), and optional exponent sign (e.g. '1e-3').
+        Repeated or mixed signs (e.g. '--50', '++50', '+-50', '-+50%', '--50%') return None.
+      - Valid finite float check: 'nan', 'inf', '-inf' return None.
+    """
     if val is None or isinstance(val, bool):
         return None
     if isinstance(val, (int, float)):
@@ -47,14 +70,58 @@ def try_parse_float(val: Any) -> float | None:
         return f if math.isfinite(f) else None
     if isinstance(val, str):
         s = val.strip()
-        # Clean currency symbols or trailing percent if simple
-        s_clean = s.lstrip("$€£¥").rstrip("%").strip()
+        if not s:
+            return None
+
+        is_pct = False
+        if "%" in s:
+            if s.count("%") != 1 or not s.endswith("%"):
+                return None
+            s = s[:-1].strip()
+            if not s:
+                return None
+            is_pct = True
+
+        currency_chars = "$€£¥"
+        num_currencies = sum(s.count(c) for c in currency_chars)
+        if num_currencies > 1:
+            return None
+
+        if num_currencies == 1:
+            curr = next(c for c in currency_chars if c in s)
+            idx = s.index(curr)
+            prefix = s[:idx].strip()
+            suffix = s[idx + 1:].strip()
+            # Allowed positions:
+            # idx == 0: prefix is empty (e.g. "$100", "$-100", "$+100")
+            # prefix in ("+", "-"): sign before currency (e.g. "+$100", "-$100")
+            # suffix == "": currency at end (e.g. "100$", "100 €", "-100€")
+            if not (prefix == "" or prefix in ("+", "-") or suffix == ""):
+                return None
+            s = (prefix + suffix).strip()
+            if not s:
+                return None
+
+        s_lower = s.lower()
+        if s_lower in ("nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"):
+            return None
+
+        # Disallow repeated/mixed signs at the start (e.g. "--50", "++50", "+-50", "-+50")
+        if len(s) >= 2 and s[0] in "+-" and s[1] in "+-":
+            return None
+
         try:
-            f = float(s_clean)
-            return f if math.isfinite(f) else None
+            f = float(s)
+            if not math.isfinite(f):
+                return None
+            if is_pct:
+                result = f / 100.0
+                return result if math.isfinite(result) else None
+            return f
         except (ValueError, TypeError):
             return None
     return None
+
 
 
 def is_boolean_value(val: Any) -> bool:
@@ -173,6 +240,7 @@ class TablePredictRequest(BaseModel):
     threshold: float = Field(0.5, ge=0.0, le=1.0)
     start_row: int = Field(2, ge=1, description="1-based starting row of data rows in scoring sheet.")
     start_col: int = Field(1, ge=1, description="1-based starting column of scoring table.")
+    explain: bool = Field(False, description="Include mathematical feature-level contribution explanation.")
 
 
 def profile_table(
@@ -199,17 +267,19 @@ def profile_table(
     warnings: list[str] = []
 
     # Check for duplicate headers
-    seen_headers: dict[str, int] = {}
+    seen_headers: dict[str, list[str]] = {}
     for i, h in enumerate(headers):
         clean_h = str(h).strip() if h is not None else ""
         if not clean_h:
             clean_h = f"Column_{col_index_to_letter(start_col_idx + i)}"
             warnings.append(f"Column {col_index_to_letter(start_col_idx + i)} has a blank header; named as '{clean_h}'.")
-        seen_headers[clean_h] = seen_headers.get(clean_h, 0) + 1
+        norm_key = normalize_header(clean_h)
+        col_letter = col_index_to_letter(start_col_idx + i)
+        seen_headers.setdefault(norm_key, []).append(f"'{clean_h}' ({col_letter})")
 
-    for h, count in seen_headers.items():
-        if count > 1:
-            warnings.append(f"Header '{h}' is duplicated {count} times across the table.")
+    for norm_key, locs in seen_headers.items():
+        if len(locs) > 1:
+            warnings.append(f"Header '{norm_key}' is duplicated or case/whitespace-equivalent {len(locs)} times across columns {', '.join(locs)}.")
 
     # Profile each column individually
     candidate_y_idx: int | None = None

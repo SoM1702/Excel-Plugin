@@ -1,111 +1,110 @@
 # Mentor Presentation and Walkthrough Guide
 
-## 1. One-Minute Executive Pitch
+## 1. Executive Pitch
 
-"In response to our faculty review, we implemented binary logistic regression completely from scratch using pure NumPy—strictly adhering to the handwritten mathematical equations from the review photograph.
+"In response to our faculty review, we implemented binary logistic regression completely from scratch using pure NumPy—strictly adhering to the mathematical equations from the review photograph.
 
-Our solution is an Excel task-pane add-in powered by a lightweight local FastAPI service. The user selects features ($X$) and an outcome column ($Y$) directly in Excel. We partition the data using seeded stratified splitting with linked percentage controls, fit feature scalers strictly on training rows, and execute full-batch gradient descent minimizing binary cross-entropy.
+Our solution is an Excel task-pane add-in powered by a lightweight local FastAPI service. By default, the add-in operates in **Table Mode**: users select any raw, mixed rectangular Excel table with headers (such as the untouched Seaborn Titanic dataset). The system profiles column types, detects and flags potential target leakage (e.g. `alive` vs `survived`), applies training-only median imputation and dummy encoding, and partitions data using seeded stratified splitting.
 
-The add-in visualizes training convergence through an interactive loss curve, provides an equation reference with a worked calculation, evaluates held-out metrics on untouched test data, allows interactive threshold tuning, and exports an audit report to a new Excel sheet without modifying the original data."
+The add-in visualizes training convergence through an interactive loss curve, evaluates held-out metrics against a majority-class baseline on untouched test data, provides an interactive threshold slider, enables truthful single-row What-If breakdown, and exports full reproducible audit reports to new Excel sheets without modifying the original data."
 
 ---
 
-## 2. Step-by-Step Demonstration Walkthrough
+## 2. Table-Mode Mentor Demo Script (Recommended Flow)
 
-### Step 1: Open Data & Select Ranges (Addresses or Named Ranges)
-- Open `sample_data.xlsx` (400 customer records, 9 features, 1 churn label).
-- **Option A (Direct Cell Selection):** In the task pane, click **Use selection** for $Y$ (`churn_data!J1:J401`) and $X$ (`churn_data!A1:I401`).
-- **Option B (Excel Named Ranges):** Demonstrate naming cell blocks directly in Excel:
-  1. Select `A1:I401`, type `CustomerFeatures` into the Excel **Name Box** (left of formula bar), and hit Enter.
-  2. Select `J1:J401`, type `ChurnOutcome` into the Name Box, and hit Enter.
-  3. In the task pane, enter `ChurnOutcome` into $Y$ and `CustomerFeatures` into $X$.
-- Notice the **Resolution Preview & Data Preview**:
-  - Live resolution banner:
-    `X: CustomerFeatures (Workbook) -> churn_data!$A$1:$I$401; 400 data rows, 9 features`
-    `Y: ChurnOutcome (Workbook) -> churn_data!$J$1:$J$401; 400 data rows, 1 outcome`
-  - Data preview displays 400 usable rows, 9 features, class distribution (208 negative, 192 positive), and confirms there are no all-constant columns.
-- Explain deterministic scoping: workbook-scoped names resolve across any sheet, while sheet-local names are checked first on the active sheet.
+Follow this concise 5-minute walkthrough during faculty evaluations:
 
-### Step 2: Demonstrate Linked Partition Controls
-- In Section 2 (Training options), examine the **Train % / Test % controls**.
-- Show that editing Train % to `80%` automatically updates Test % to `20%`, moves the slider to `0.20`, and updates the count preview:
-  `Train: 320 rows (80%), Test: 80 rows (20%) for N=400`.
-- Change it back to `70% / 30%` (`Train: 280, Test: 120`). Explain the ceiling rounding formula: $n_{\text{test}} = \lceil N \cdot \text{test\_fraction} \rceil$.
+### Step 1: Inspect Raw Mixed Table in Excel
+- Open the workbook containing the raw table (e.g., the untouched Titanic dataset with 891 rows and 15 columns from `survived` to `alone`).
+- In the task pane, ensure **Table Mode** is active.
+- Enter or select the full table range: `titanic!$A$1:$O$892`.
+- Click **Inspect table columns**.
 
-### Step 3: Explain the Handwritten Equations & Worked Example
-- Open the **Mathematical equations reference** card in the task pane:
-  1. **Logit:** $z_i = \sum_{j=1}^d w_j x_{ij} + b = \mathbf{w}^T \mathbf{x}_i + b$
-  2. **Sigmoid:** $p_i = \sigma(z_i) = \frac{1}{1 + e^{-z_i}}$
-  3. **Binary Cross-Entropy Loss:** $J(\mathbf{w}, b) = -\frac{1}{m} \sum_{i=1}^m [y_i \ln(p_i) + (1-y_i) \ln(1-p_i)]$
-  4. **Gradients:** $\mathbf{d}\mathbf{w} = \frac{1}{m} \mathbf{X}^T (\mathbf{p} - \mathbf{y}), \quad db = \frac{1}{m} \sum_{i=1}^m (p_i - y_i)$
-  5. **Parameter Update:** $\mathbf{w} \leftarrow \mathbf{w} - \alpha \, \mathbf{d}\mathbf{w}, \quad b \leftarrow b - \alpha \, db$
-- Walk through the single observation teaching arithmetic:
-  - Observation: $x = 2.0, y = 1.0$. Initial $w = 0, b = 0, \alpha = 0.1$.
-  - Initial logit $z = 0$, probability $p = 0.5$, loss $J = \ln(2) \approx 0.6931$.
-  - Analytical gradients: $dw = (0.5 - 1.0) \times 2 = -1.0$; $db = (0.5 - 1.0) = -0.5$.
-  - Updated parameters: $w = 0 - 0.1(-1.0) = 0.10$; $b = 0 - 0.1(-0.5) = 0.05$.
-  - Next state: $z = 0.25$, $p \approx 0.5622$, loss $J \approx 0.5759$ (probability increases toward $y=1$, loss decreases).
+### Step 2: Explain Automated Profiling & Target Leakage Detection
+- Point out the profiling results card:
+  - Total columns detected (15 columns), row count (891 rows), detected scalar data types (numeric, boolean, categorical).
+  - Show the **Leakage Candidate Alert**: column `alive` (column N) is flagged as a leakage candidate because it has a 1-to-1 correspondence with `survived` (column A).
+  - Explain to the mentor: *"Our preprocessor inspects the entire table and flags `alive` so that students or analysts do not accidentally train a model on a post-outcome duplicate."*
+- Select `survived` as $Y$, and select the feature subset for $X$: `pclass`, `sex`, `age`, `sibsp`, `parch`, `fare` (leave `alive` and other redundant/identifier columns unchecked).
 
-### Step 4: Fit the Scratch Model
+### Step 3: Choose Data Split
+- In Training Options, show the linked Train % / Test % controls (e.g., 70% Train / 30% Test $\to$ 623 train rows / 268 test rows for $N=891$).
+- Explain that preprocessing rules (imputation medians, dummy encoding levels, standardisation means/scales) are computed **strictly on training rows** with zero leakage into the test set.
+
+### Step 4: Fit Scratch Model
 - Click **Fit scratch model**.
 - Show the **Diagnostics Banner**:
-  - Convergence badge: `Converged ✓` (or stopped at iteration cap).
-  - Initial loss vs Final loss: e.g. $0.6931 \to 0.4578$.
-  - Iteration count and final gradient norm (e.g. $< 10^{-6}$).
-- Show the **Training Loss Curve**:
-  - Chart.js plots binary cross-entropy vs iteration pass, demonstrating monotonic objective reduction.
+  - Convergence badge: `Converged ✓` with final gradient norm.
+  - Loss trajectory: monotonic descent on binary cross-entropy $J(\mathbf{w}, b)$.
+- Show the **Training Loss Curve** (Chart.js visualization).
 
-### Step 5: Held-Out Evaluation & Threshold Tuning
-- Review the held-out metrics cards: Accuracy @ 0.50, AUC, Precision, Recall, and majority-class baseline.
-- Move the **Threshold slider**:
-  - Point out that the confusion matrix (TN, FP, FN, TP) and threshold metrics (@thr) update instantaneously from held-out probabilities.
+### Step 5: Read Held-Out Metrics & Baseline Comparison
+- Review the held-out performance metrics:
+  - Accuracy @ 0.50 (e.g., `0.817`).
+  - ROC AUC (e.g., `0.886`).
+  - Training majority-class baseline (e.g., `0.616` for predicting all perished).
+  - Accuracy Gain: point out `+0.201` (+20.1% improvement over simply guessing the majority class).
+- Move the **Threshold slider**: show live confusion matrix and classification metric updates.
 
-### Step 6: Export Report to a New Sheet & Snapshot Verification
-- Click **Export report to new sheet**.
-- Switch to the newly generated `LR Report <timestamp>` sheet in Excel:
-  - Model settings and scratch algorithm identity.
-  - Source tracking rows: records original input text, scope, and resolved absolute address (e.g. `CustomerFeatures (Workbook) -> churn_data!$A$1:$I$401`).
-  - Convergence statistics and stopping reason.
-  - Weights ($w$) and Odds Ratios ($\exp(w)$).
-  - Feature scaling parameters ($\mu, \sigma$).
-  - Training loss iteration history table.
-  - All source-row predictions tagged with their exact partition (`"train"` vs `"test"`).
-- **Demonstrate Snapshot Safety:**
-  - In Excel's Name Manager, change `CustomerFeatures` target or edit cell values in the sheet, then click Export again.
-  - This guarantees that exported models can never become desynchronized from the worksheet data.
+### Step 6: Inspect Parameters & Formula
+- Review the learned weights table ($\mathbf{w}$) and intercept ($b$).
+- Click **Export model weights** to write a native Excel recalculable formula sheet (`=SUMPRODUCT + IF/EXP`).
 
-### Step 7: Score New Rows / What-If Prediction & Step-by-Step Breakdown
-- In the task pane, test the **What-if calculator** by entering values for a customer and clicking **Calculate probability**:
-  - Show the **Feature Contributions Table**: displays raw values, standardized values, weights, and individual signed contributions $w_j \tilde{x}_j$.
-  - Show the **Step-by-Step Calculation Breakdown Card**:
-    1. Sum of feature contributions: $\sum (w_j \cdot \tilde{x}_j) = \dots$
+### Step 7: Single-Row What-If Prediction with Truthful Breakdown
+- Scroll to the **Single-row what-if calculator**:
+  - Enter hypothetical values for a passenger (e.g. Class 1, female, Age 35, Fare 50).
+  - Click **Calculate probability**.
+- Demonstrate the **Truthful Mathematical Breakdown**:
+  - **Feature Table**: shows generated features (`pclass`, `sex=female`, `age`), raw values, standardized values, weights, and signed contributions $w_j \hat{x}_j$.
+  - **Calculation Steps**:
+    1. Sum of feature contributions: $\sum(w_j \cdot \hat{x}_j) = \dots$
     2. Learned intercept: $b = \dots$
     3. Linear score: $z = \sum + b = \dots$
     4. Sigmoid probability: $p = \sigma(z) = \dots\%$
-    5. Decision rule: $p \ge \text{threshold} \implies \text{Class}$.
-- Move the **Threshold slider**:
-  - Point out that the predicted class flips dynamically, while weights, linear score $z$, and probability $p$ remain strictly untouched.
-- Edit any input field:
-  - Point out that the explanation card immediately clears to avoid displaying stale calculations until recalculated.
-- For batch prediction, enter either an address (`Sheet2!A2:I25`) or a defined name (`NewCustomers`), click **Score new rows**, and export the new predictions.
+    5. Decision: $p \ge \text{threshold} \implies \text{Class}$.
+  - **Data Preparation Details**: shows exact transformations applied (e.g., `sex=female` active indicator, median imputation if age omitted, reference category baseline).
+  - Explain: *"Every number in this breakdown directly sums to the linear score and matches the sigmoid probability."*
 
-### Step 8: Export Model Weights & Demonstrate Live Excel Recalculation
-- Click **Export model weights**.
-- Switch to the newly created `Model Weights <timestamp>` worksheet in Excel:
-  - Show model identification, sample count, convergence status, and feature space metadata.
-  - Show the **Parameter Specification Table** with full-precision weights in both model space and original units, plus feature means and standard deviations, formatted to 6 decimal places.
-  - Show the **Live Recalculable Excel Formula Example**:
-    - Input row and weight row arranged horizontally so `SUMPRODUCT` evaluates with matching dimensions:
-      `=SUMPRODUCT(C25:E25, C26:E26) + B27`
-    - Numerically stable sigmoid formula:
-      `=IF(B30>=0, 1/(1+EXP(-B30)), EXP(B30)/(1+EXP(B30)))`
-    - Classification decision:
-      `=IF(B31>=B28, 1, 0)`
-  - **Live Test**: Edit an input cell in Excel right in front of the mentor; Excel instantly recalculates the linear score, probability, and predicted class natively without touching Python.
+### Step 8: Batch Scoring & Export Full Audit Report
+- Use **Score new rows** to score an entire new table or batch.
+- Click **Export full report to new sheet** to demonstrate an immutable audit report generated without touching source rows.
 
 ---
 
-## 3. Anticipated Faculty Questions & Answers
+## 3. Honest Project Limitations & Scope
+
+When discussing the project with faculty, state these limitations transparently:
+
+1. **No Causal Claims**: Logistic regression coefficients represent conditional statistical associations, not causal effects. Unobserved confounders or selection biases in observational data cannot be resolved purely through regression.
+2. **Standard Errors and p-values Unavailable**: In full-batch gradient descent without second-order Hessian matrix inversion, classical Wald p-values cannot be rigorously produced without asymptotic covariance assumptions. We display learned weights and odds ratios, but mark asymptotic p-values as unavailable.
+3. **In-Memory Model Lifecycle**: The active model resides in local service memory (`_LAST_MODEL`). The architecture is tailored for single-user analytical sessions in Excel rather than persistent multi-tenant cloud storage.
+4. **Precise Input Support**: The table preprocessor supports scalar numeric, boolean, and low-cardinality categorical columns with documented median imputation, binary dummy encoding, and missing-bucket policies. It does not handle arbitrary Excel formula objects, multidimensional arrays, nested data structures, or image data.
+5. **Future Work**: Multi-user cloud deployment, automated hyperparameter tuning (grid search), and deep neural architectures for unstructured/image data remain future extensions.
+
+---
+
+## 4. Manual Test Checklist & Verification Evidence
+
+Record the verification status for live Excel demonstrations:
+
+| Test Case | Objective & Steps | Expected Result | Verification Status |
+|---|---|---|---|
+| **1. Table Mode Inspection** | Select full table `titanic!$A$1:$O$892` and click *Inspect table columns*. | Profiles 891 rows, 15 columns; flags `alive` (col N) as leakage candidate. | **Observed in live Excel** |
+| **2. Target Leakage Rejection** | Verify `alive` is flagged with warning and excluded from default $X$. | Prevents 100% artificial accuracy from duplicate outcome column. | **Observed in live Excel** |
+| **3. Stratified Split Integrity** | Choose 70/30 split. Fit model on selected $X$ features. | Exactly 623 train and 268 test rows; train-only medians. | **Observed in live Excel** |
+| **4. Convergence & Metrics** | Review loss curve and held-out metrics. | Converged; Acc @ 0.50: ~0.817, AUC: ~0.886 > baseline (0.616). | **Observed in live Excel** |
+| **5. Batch vs What-If Equality** | Score an identical row via What-If and batch New Rows. | Predicted probability and score match to at least 6 decimal places. | **Covered by automated test** (Live Excel check pending) |
+| **6. Truthful Breakdown Check** | Check that $\sum(w_j \cdot \hat{x}_j) + b = z$ and $\sigma(z) = p$ in What-If. | Feature table contributions sum plus intercept equals linear score $z$. | **Covered by automated test** (Live Excel check pending) |
+| **7. Explanation Unavailable Path** | Trigger missing explanation, backend error, or contract mismatch. | Hides breakdown and steps; displays clear *Explanation unavailable* notice. | **Covered by automated test** |
+| **8. Input Limit Guardrail** | Test 26 source columns in table mode. | Disables What-If button with guidance directing to *Score new rows*. | **Covered by automated test** |
+| **9. Stale-Header Detection** | Rename a column header in Excel after inspection and click Fit. | Blocks training with clear error: *Table headers or columns have changed*. | **Covered by automated test** |
+| **10. Invalid Cell Error** | Place text in numeric column at row 23. | Error message names exact physical Excel row: *Column 'age' (row 23)...*. | **Covered by automated test** |
+| **11. Formula Recalculation** | Export model weights; edit input cell in Excel. | Excel formula recalculates $z$, $p$, and class natively without Python. | **Observed in live Excel** |
+| **12. Service Offline Handling** | Stop FastAPI backend and click *Fit scratch model*. | Displays clean, actionable notification: *Backend service unreachable*. | **Observed in live Excel** |
+
+---
+
+## 5. Anticipated Faculty Questions & Answers
 
 ### Q1: "Why did you use Binary Cross-Entropy instead of the squared-error expression in the photo?"
 **Answer:** The squared-error expression $\frac{1}{2m}\sum (p_i - y_i)^2$ is half the Mean Squared Error (the Brier score), not binary cross-entropy. For a sigmoid activation, minimizing MSE introduces an additional $p_i(1-p_i)$ factor into the gradient, causing vanishing gradients when the model is confidently wrong. Binary cross-entropy is the canonical Maximum Likelihood Estimation (MLE) criterion for Bernoulli distributions. We compute Brier score as an evaluation diagnostic, but optimize binary cross-entropy for training.
@@ -113,8 +112,9 @@ The add-in visualizes training convergence through an interactive loss curve, pr
 ### Q2: "How do you ensure zero data leakage?"
 **Answer:**
 1. **Feature scaling:** Column means and population standard deviations are computed strictly using training rows ($X_{\text{train}}$) and applied unchanged to test rows ($X_{\text{test}}$).
-2. **Cross-validation:** During 5-fold CV, a fresh scaler and model are fit inside every fold.
-3. **Threshold selection:** The optimal F1 threshold is selected exclusively from out-of-fold training predictions. Held-out test rows are evaluated only once after the model is locked.
+2. **Missing value imputation:** Medians and modes are calculated strictly on the training partition.
+3. **Cross-validation:** During 5-fold CV, a fresh preprocessor, scaler, and model are fit inside every fold.
+4. **Threshold selection:** The optimal F1 threshold is selected exclusively from out-of-fold training predictions. Held-out test rows are evaluated only once after the model is locked.
 
 ### Q3: "Why are p-values and standard errors marked n/a?"
 **Answer:** In full-batch gradient descent without an asymptotic inverted Hessian covariance matrix, Wald p-values cannot be rigorously guaranteed without large-sample asymptotic assumptions that gradient descent does not verify. Rather than emitting misleading pseudo p-values, we display weights and exponentiated odds ratios, and transparently mark p-values as n/a.
@@ -126,7 +126,7 @@ The add-in visualizes training convergence through an interactive loss curve, pr
 **Answer:**
 1. **Deterministic resolution:** Unqualified names check the active worksheet's local defined names first, then workbook-scoped names. Qualified names (`'Sheet1'!Name`) explicitly target that sheet.
 2. **Unsupported inputs:** We validate that the defined name refers to a single contiguous rectangular worksheet range. Multi-area unions, external workbook links, array constants, scalar formulas, and broken `#REF!` definitions fail with clear, actionable messages.
-3. **Snapshot integrity:** We snapshot the full descriptor and exact 2D values. Before exporting a report, the add-in re-verifies the named range against the saved snapshot (using its original scope, unaffected by switching active sheets). If the definition, cells, or geometry changed, the export is blocked until refitted or rescored.
+3. **Snapshot integrity:** We snapshot the full descriptor and exact 2D values. Before exporting a report, the add-in re-verifies the named range against the saved snapshot. If the definition, cells, or geometry changed, the export is blocked until refitted or rescored.
 
 ### Q6: "Can you prove that your standardized model and original-unit equation give identical results?"
 **Answer:** Yes. We mathematically derive the closed-form conversion:

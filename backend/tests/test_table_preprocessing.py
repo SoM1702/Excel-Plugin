@@ -274,6 +274,166 @@ class TestTablePreprocessingScratch(unittest.TestCase):
         X_reconstituted = reconstituted.transform(test_rows)
         np.testing.assert_array_equal(X_transformed, X_reconstituted)
 
+    def test_percentage_text_parsing_and_scoring_equivalence(self):
+        """P1 regression: Percentage text '50%' must parse to 0.5 and match numeric 0.5."""
+        from table_schema import try_parse_float
+
+        # Direct parser assertions
+        self.assertEqual(try_parse_float(0.5), 0.5)
+        self.assertEqual(try_parse_float(50), 50.0)
+        self.assertEqual(try_parse_float("50%"), 0.5)
+        self.assertEqual(try_parse_float(" 50 % "), 0.5)
+        self.assertEqual(try_parse_float("-50%"), -0.5)
+        self.assertEqual(try_parse_float("+50%"), 0.5)
+        self.assertEqual(try_parse_float("-50"), -50.0)
+        self.assertEqual(try_parse_float("+50"), 50.0)
+        self.assertEqual(try_parse_float("-12.5%"), -0.125)
+        self.assertEqual(try_parse_float("+12.5%"), 0.125)
+        self.assertEqual(try_parse_float("-$50%"), -0.5)
+        self.assertEqual(try_parse_float("$-50%"), -0.5)
+        self.assertEqual(try_parse_float("+$50%"), 0.5)
+        self.assertEqual(try_parse_float("$+50%"), 0.5)
+        self.assertEqual(try_parse_float("0.5"), 0.5)
+        self.assertEqual(try_parse_float("0"), 0.0)
+        self.assertEqual(try_parse_float("0.0"), 0.0)
+        self.assertEqual(try_parse_float("0%"), 0.0)
+        self.assertEqual(try_parse_float("1e-3"), 0.001)
+        self.assertEqual(try_parse_float("1.5e+2"), 150.0)
+        self.assertEqual(try_parse_float("-2.3e-4"), -0.00023)
+        self.assertEqual(try_parse_float("$100"), 100.0)
+        self.assertEqual(try_parse_float("-$100"), -100.0)
+        self.assertEqual(try_parse_float("$-100"), -100.0)
+        self.assertEqual(try_parse_float("+$100"), 100.0)
+        self.assertEqual(try_parse_float("$+100"), 100.0)
+        self.assertEqual(try_parse_float("100€"), 100.0)
+        self.assertEqual(try_parse_float("-100€"), -100.0)
+        self.assertEqual(try_parse_float("€50%"), 0.5)
+        self.assertEqual(try_parse_float("-€50%"), -0.5)
+        self.assertEqual(try_parse_float("€-50%"), -0.5)
+
+        # Malformed percentages, repeated signs, and invalid numbers must return None
+        self.assertIsNone(try_parse_float("--50%"))
+        self.assertIsNone(try_parse_float("+-50"))
+        self.assertIsNone(try_parse_float("++50"))
+        self.assertIsNone(try_parse_float("-+50%"))
+        self.assertIsNone(try_parse_float("$$50"))
+        self.assertIsNone(try_parse_float("-$+50%"))
+        self.assertIsNone(try_parse_float("$-+50%"))
+        self.assertIsNone(try_parse_float("1$00"))
+        self.assertIsNone(try_parse_float("1e--3"))
+        self.assertIsNone(try_parse_float("50%%"))
+        self.assertIsNone(try_parse_float("%%"))
+        self.assertIsNone(try_parse_float("%50"))
+        self.assertIsNone(try_parse_float("5%0%"))
+        self.assertIsNone(try_parse_float("%"))
+        self.assertIsNone(try_parse_float(None))
+        self.assertIsNone(try_parse_float(""))
+        self.assertIsNone(try_parse_float("   "))
+        self.assertIsNone(try_parse_float("nan"))
+        self.assertIsNone(try_parse_float("inf"))
+        self.assertIsNone(try_parse_float("-infinity"))
+
+
+        # Preprocessor train on numeric, predict on percent text equivalence
+        prep = TablePreprocessorScratch(
+            selected_indices=[0],
+            source_headers=["Rate"],
+            column_types={"Rate": "numeric"},
+        )
+        prep.fit([[0.1], [0.5], [0.9]])
+
+        # Numeric 0.5 vs percent text '50%'
+        X_numeric = prep.transform([[0.5]])
+        X_percent_text = prep.transform([["50%"]])
+        np.testing.assert_array_almost_equal(X_numeric, X_percent_text)
+        self.assertAlmostEqual(X_percent_text[0, 0], 0.5)
+
+    def test_distinct_categories_literal_missing_and_escaped_missing_do_not_collapse(self):
+        """P2 regression: Literal '_missing_' and '\\_missing\\_' must not collapse into one category."""
+        train_rows = [
+            ["ref"],
+            ["ref"],
+            ["_missing_"],
+            [r"\_missing\_"],
+        ]
+        prep = TablePreprocessorScratch(
+            selected_indices=[0],
+            source_headers=["Tag"],
+        )
+        prep.fit(train_rows)
+
+        spec = prep.column_specs[0]
+        self.assertEqual(spec.reference_category, "ref")
+        # Both user categories must be present and distinct in vocabulary
+        self.assertIn("_missing_", spec.all_train_categories)
+        self.assertIn(r"\_missing\_", spec.all_train_categories)
+        self.assertIn("_missing_", spec.cat_to_offset)
+        self.assertIn(r"\_missing\_", spec.cat_to_offset)
+        self.assertNotEqual(spec.cat_to_offset["_missing_"], spec.cat_to_offset[r"\_missing\_"])
+
+        test_rows = [
+            ["ref"],            # 0: Reference level -> [0, 0, 0]
+            ["_missing_"],      # 1: Literal "_missing_"
+            [r"\_missing\_"],   # 2: Literal r"\_missing\_"
+            [None],             # 3: Real blank
+            ["unseen"],         # 4: Unseen category -> [0, 0, 0]
+        ]
+        X = prep.transform(test_rows)
+
+        # Row 1 and Row 2 must have distinct one-hot indicator vectors
+        self.assertFalse(
+            np.array_equal(X[1], X[2]),
+            f"Literal '_missing_' ({X[1]}) and '\\_missing\\_' ({X[2]}) collapsed into the same vector!",
+        )
+        # Blank (row 3) must be distinct from both literals
+        self.assertFalse(np.array_equal(X[3], X[1]), "Real blank collapsed into literal '_missing_'!")
+        self.assertFalse(np.array_equal(X[3], X[2]), "Real blank collapsed into literal '\\_missing\\'!")
+
+        # Reference level is all 0
+        self.assertTrue(np.all(X[0] == 0.0))
+
+        # Serialization fidelity check
+        serialized = prep.to_dict()
+        reconstituted = TablePreprocessorScratch.from_dict(serialized)
+        X_rebuilt = reconstituted.transform(test_rows)
+        np.testing.assert_array_equal(X, X_rebuilt)
+
+    def test_generated_feature_name_collision_handling(self):
+        """P2 regression: Source headers containing '=' or colliding candidate names must produce unique features."""
+        train_rows = [
+            [10.0, "B"],
+            [20.0, "B"],
+            [30.0, "C"],
+        ]
+        # Column 0 header is 'A=B', Column 1 header is 'A' with category 'B'
+        prep = TablePreprocessorScratch(
+            selected_indices=[0, 1],
+            source_headers=["A=B", "A"],
+            column_types={"A=B": "numeric", "A": "categorical"},
+        )
+        prep.fit(train_rows)
+
+        feature_names = prep.generated_feature_names
+        self.assertEqual(len(feature_names), len(set(feature_names)), f"Feature names contain collisions: {feature_names}")
+
+    def test_thread_safe_transform_with_warnings(self):
+        """P2 regression: transform_with_warnings must return request-local warnings without mutating fitted state."""
+        prep = TablePreprocessorScratch(
+            selected_indices=[0],
+            source_headers=["Col"],
+            column_types={"Col": "categorical"},
+        )
+        prep.fit([["knownA"], ["knownA"], ["knownB"]])
+
+        # Request with unseen category
+        _, warnings_unseen = prep.transform_with_warnings([["unseenCategory"]])
+        self.assertEqual(len(warnings_unseen), 1)
+        self.assertIn("unseenCategory", warnings_unseen[0])
+
+        # Request with known category must NOT see warnings from the prior request
+        _, warnings_known = prep.transform_with_warnings([["knownA"]])
+        self.assertEqual(len(warnings_known), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

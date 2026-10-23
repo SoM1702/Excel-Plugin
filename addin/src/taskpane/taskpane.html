@@ -329,8 +329,10 @@
       <h2>Single-row what-if calculator</h2>
       <div id="whatif-inputs"></div>
       <button id="whatif-btn" class="secondary" disabled>Calculate probability</button>
+      <p id="whatif-limit-note" class="muted small hidden" style="margin-top: 4px;"></p>
       <div id="whatif-result" class="whatif-result hidden">
         <div id="whatif-summary" class="whatif-summary"></div>
+        <div id="whatif-unavailable-msg" class="muted small hidden" style="margin-top: 6px;"></div>
         <div id="whatif-worked-card" class="whatif-worked-card">
           <div class="step-label" style="margin-top:6px; margin-bottom:4px;">Worked prediction breakdown</div>
           <div class="table-wrap" style="max-height:160px; margin-bottom:6px;">
@@ -348,6 +350,7 @@
             </table>
           </div>
           <div id="whatif-calculation-steps" class="whatif-steps small"></div>
+          <div id="whatif-prep-notes" class="whatif-prep-notes small muted" style="margin-top:6px;"></div>
         </div>
       </div>
 
@@ -372,6 +375,7 @@
 
   <div id="error-toast" class="toast hidden"></div>
 
+  <script src="config.js"></script>
   <script src="range-input.js"></script>
   <script src="taskpane.js"></script>
 </body>

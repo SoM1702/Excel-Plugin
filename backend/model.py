@@ -30,7 +30,14 @@ from metrics import (
 from preprocessing import StandardScalerScratch, check_constant_features
 from splitting import StratifiedKFoldScratch, train_test_split_scratch
 from table_preprocessing import TablePreprocessorScratch
-from table_schema import is_missing, is_invalid, col_index_to_letter
+from table_schema import (
+    is_missing,
+    is_invalid,
+    col_index_to_letter,
+    try_parse_float,
+    to_boolean_float,
+    normalize_header,
+)
 
 
 DEFAULT_THRESHOLD = 0.5
@@ -102,7 +109,7 @@ class TrainedModel:
         for i, h in enumerate(headers):
             if h is None:
                 continue
-            clean_h = str(h).strip().lower()
+            clean_h = normalize_header(h)
             if clean_h in seen_headers:
                 duplicate_headers.add(clean_h)
             seen_headers.add(clean_h)
@@ -111,7 +118,7 @@ class TrainedModel:
         col_mapping: list[int] = []
         for sel_idx in self.table_preprocessor.selected_indices:
             expected_header = self.table_preprocessor.source_headers[sel_idx]
-            clean_expected = str(expected_header).strip().lower()
+            clean_expected = normalize_header(expected_header)
             if clean_expected in duplicate_headers:
                 raise ValueError(
                     f"Prediction table has ambiguous duplicate header '{expected_header}'. "
@@ -132,10 +139,143 @@ class TrainedModel:
                 new_r[sel_idx] = r[mapped_idx] if mapped_idx < len(r) else None
             reordered_rows.append(new_r)
 
-        X_transformed = self.table_preprocessor.transform(reordered_rows, start_row=start_row, row_numbers=row_numbers)
+        X_transformed, warnings = self.table_preprocessor.transform_with_warnings(
+            reordered_rows, start_row=start_row, row_numbers=row_numbers
+        )
         scores, probs = self.predict_score_and_proba(X_transformed)
-        warnings = list(self.table_preprocessor.last_transform_warnings)
         return scores, probs, warnings
+
+    def explain_raw_table_row(
+        self,
+        headers: list[str],
+        row: list,
+        start_row: int = 2,
+    ) -> dict:
+        if self.table_preprocessor is None:
+            raise ValueError("This model was trained in numeric mode and cannot explain raw tables.")
+
+        seen_headers: set[str] = set()
+        duplicate_headers: set[str] = set()
+        header_to_idx: dict[str, int] = {}
+        for i, h in enumerate(headers):
+            if h is None:
+                continue
+            clean_h = normalize_header(h)
+            if clean_h in seen_headers:
+                duplicate_headers.add(clean_h)
+            seen_headers.add(clean_h)
+            header_to_idx[clean_h] = i
+
+        col_mapping: list[int] = []
+        for sel_idx in self.table_preprocessor.selected_indices:
+            expected_header = self.table_preprocessor.source_headers[sel_idx]
+            clean_expected = normalize_header(expected_header)
+            if clean_expected in duplicate_headers:
+                raise ValueError(
+                    f"Prediction table has ambiguous duplicate header '{expected_header}'. "
+                    "Each column in the prediction table must have a unique header name."
+                )
+            if clean_expected not in header_to_idx:
+                raise ValueError(
+                    f"Required feature column '{expected_header}' was not found in the prediction table. "
+                    f"Available headers: {', '.join(str(h) for h in headers)}"
+                )
+            col_mapping.append(header_to_idx[clean_expected])
+
+        max_idx = max(self.table_preprocessor.selected_indices) if self.table_preprocessor.selected_indices else 0
+        new_r = [None] * (max_idx + 1)
+        for sel_idx, mapped_idx in zip(self.table_preprocessor.selected_indices, col_mapping):
+            new_r[sel_idx] = row[mapped_idx] if mapped_idx < len(row) else None
+
+        X_transformed, _ = self.table_preprocessor.transform_with_warnings([new_r], start_row=start_row)
+        is_standardized = self.scaler is not None
+        if is_standardized:
+            X_scaled = self.scaler.transform(X_transformed)
+        else:
+            X_scaled = X_transformed.copy()
+
+        weights = np.asarray(self.clf.w, dtype=float)
+        intercept = float(self.clf.b)
+        raw_vec = X_transformed[0]
+        scaled_vec = X_scaled[0]
+        contributions = scaled_vec * weights
+        sum_contributions = float(np.sum(contributions))
+        linear_score = float(sum_contributions + intercept)
+        prob = float(sigmoid(linear_score))
+
+        model_score = float(self.clf.predict_score(X_scaled)[0])
+        model_prob = float(sigmoid(model_score))
+        diff_score = abs(linear_score - model_score)
+        diff_prob = abs(prob - model_prob)
+        math_valid = bool(diff_score < 1e-6 and diff_prob < 1e-6)
+
+        features = []
+        for j, feat_name in enumerate(self.table_preprocessor.generated_feature_names):
+            features.append({
+                "feature": feat_name,
+                "raw_value": float(raw_vec[j]),
+                "scaled_value": float(scaled_vec[j]),
+                "weight": float(weights[j]),
+                "contribution": float(contributions[j]),
+            })
+
+        preparation_notes = []
+        for spec, mapped_idx in zip(self.table_preprocessor.column_specs, col_mapping):
+            val = row[mapped_idx] if mapped_idx < len(row) else None
+            header_name = spec.source_header
+            if is_missing(val):
+                if spec.col_type == "numeric":
+                    preparation_notes.append(
+                        f"Column '{header_name}': missing value → imputed with training median ({spec.impute_value})"
+                    )
+                elif spec.col_type == "boolean":
+                    default_str = "True" if spec.impute_value == 1.0 else "False"
+                    preparation_notes.append(
+                        f"Column '{header_name}': missing value → imputed with training default ({default_str})"
+                    )
+                elif spec.col_type == "categorical":
+                    miss_feat = spec.missing_feature_name or (spec.generated_features[spec.missing_indicator_offset] if (spec.has_missing_indicator and spec.missing_indicator_offset is not None) else f"{header_name}=_missing_")
+                    preparation_notes.append(
+                        f"Column '{header_name}': missing/blank value → encoded with dedicated missing indicator '{miss_feat}' (= 1.0)"
+                    )
+            else:
+                if spec.col_type == "categorical":
+                    raw_cat = str(val).strip()
+                    if raw_cat == spec.reference_category:
+                        preparation_notes.append(
+                            f"Column '{header_name}': value '{raw_cat}' is reference level → baseline (all dummy features = 0)"
+                        )
+                    elif raw_cat in spec.cat_to_offset:
+                        feat_name = spec.generated_features[spec.cat_to_offset[raw_cat]]
+                        preparation_notes.append(
+                            f"Column '{header_name}': value '{raw_cat}' → active dummy '{feat_name}' = 1.0"
+                        )
+                    else:
+                        preparation_notes.append(
+                            f"Column '{header_name}': unseen category '{raw_cat}' → mapped to reference baseline (all dummy features = 0) with warning"
+                        )
+                elif spec.col_type == "boolean":
+                    bf = to_boolean_float(val)
+                    preparation_notes.append(
+                        f"Column '{header_name}': boolean value '{val}' → encoded as {bf}"
+                    )
+                elif spec.col_type == "numeric":
+                    pf = try_parse_float(val)
+                    preparation_notes.append(
+                        f"Column '{header_name}': numeric value {pf}"
+                    )
+
+        return {
+            "math_valid": math_valid,
+            "intercept": intercept,
+            "standardized": is_standardized,
+            "sum_contributions": sum_contributions,
+            "linear_score": linear_score,
+            "probability": prob,
+            "diff_score": diff_score,
+            "features": features,
+            "preparation_notes": preparation_notes,
+        }
 
 
 
@@ -858,34 +998,41 @@ def train_table_logistic(
         if idx < 0 or idx >= total_cols:
             raise ValueError(f"Selected feature index {idx} is out of table bounds [0, {total_cols - 1}].")
 
-    # Check for duplicate feature header names
-    selected_header_map: dict[str, list[str]] = {}
+    # Check for duplicate feature header names using canonical normalize_header
+    selected_header_map: dict[str, list[tuple[str, str]]] = {}
     for idx in selected_x_columns:
         h = headers[idx] if idx < len(headers) else f"Col_{idx}"
+        norm_h = normalize_header(h)
         col_letter = col_index_to_letter(start_col - 1 + idx)
-        selected_header_map.setdefault(h, []).append(f"{col_letter} (index {idx})")
+        selected_header_map.setdefault(norm_h, []).append((str(h), f"{col_letter} (index {idx})"))
 
-    duplicate_headers = {h: locs for h, locs in selected_header_map.items() if len(locs) > 1}
+    duplicate_headers = {norm_h: entries for norm_h, entries in selected_header_map.items() if len(entries) > 1}
     if duplicate_headers:
-        first_h, locs = next(iter(duplicate_headers.items()))
+        first_norm, entries = next(iter(duplicate_headers.items()))
+        loc_strs = [f"'{h}' at {loc}" for h, loc in entries]
         raise ValueError(
-            f"Duplicate selected feature header '{first_h}' detected at columns {', '.join(locs)}. "
-            "Please rename duplicate headers in Excel before fitting."
+            f"Ambiguous or duplicate selected feature header detected for '{entries[0][0]}' ({', '.join(loc_strs)}). "
+            "Please ensure selected column headers are unique up to case and whitespace."
         )
 
     # 1. Resolve Y column index
     if isinstance(y_column, int):
         y_idx = int(y_column)
     else:
-        clean_target = str(y_column).strip().lower()
-        found_idx = None
-        for i, h in enumerate(headers):
-            if str(h).strip().lower() == clean_target:
-                found_idx = i
-                break
-        if found_idx is None:
+        clean_target = normalize_header(y_column)
+        matching_indices = [
+            i for i, h in enumerate(headers)
+            if normalize_header(h) == clean_target
+        ]
+        if not matching_indices:
             raise ValueError(f"Outcome column '{y_column}' was not found in table headers.")
-        y_idx = found_idx
+        if len(matching_indices) > 1:
+            matched_descs = [f"'{headers[i]}' ({col_index_to_letter(start_col - 1 + i)}, index {i})" for i in matching_indices]
+            raise ValueError(
+                f"Outcome column '{y_column}' is ambiguous: matches multiple headers ({', '.join(matched_descs)}). "
+                "Specify the outcome column by index or rename duplicate headers in Excel."
+            )
+        y_idx = matching_indices[0]
 
     if y_idx < 0 or y_idx >= total_cols:
         raise ValueError(f"Invalid outcome column index: {y_idx}")
@@ -896,11 +1043,13 @@ def train_table_logistic(
         )
 
     y_header = headers[y_idx] if y_idx < len(headers) else f"Col_{y_idx}"
-    if y_header in selected_header_map:
-        locs = selected_header_map[y_header]
+    y_norm = normalize_header(y_header)
+    if y_norm in selected_header_map:
+        entries = selected_header_map[y_norm]
         y_loc = f"{col_index_to_letter(start_col - 1 + y_idx)} (index {y_idx})"
+        feature_locs = [f"'{h}' at {loc}" for h, loc in entries]
         raise ValueError(
-            f"Outcome column header '{y_header}' at {y_loc} conflicts with selected feature at {', '.join(locs)}. "
+            f"Outcome column header '{y_header}' at {y_loc} conflicts with selected feature {', '.join(feature_locs)}. "
             "Please rename headers in Excel before fitting."
         )
 

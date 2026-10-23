@@ -39,6 +39,10 @@ class ColumnSpec:
         self.categories: list[str] = []  # Active indicator categories (excluding reference)
         self.reference_category: str | None = None  # Base category
         self.all_train_categories: list[str] = []
+        self.has_missing_indicator: bool = False
+        self.missing_indicator_offset: int | None = None
+        self.cat_to_offset: dict[str, int] = {}
+        self.missing_feature_name: str | None = None
         self.generated_features: list[str] = []
 
     def to_dict(self) -> dict[str, Any]:
@@ -51,6 +55,10 @@ class ColumnSpec:
             "categories": self.categories,
             "reference_category": self.reference_category,
             "all_train_categories": self.all_train_categories,
+            "has_missing_indicator": self.has_missing_indicator,
+            "missing_indicator_offset": self.missing_indicator_offset,
+            "cat_to_offset": self.cat_to_offset,
+            "missing_feature_name": self.missing_feature_name,
             "generated_features": self.generated_features,
         }
 
@@ -67,6 +75,21 @@ class ColumnSpec:
         spec.reference_category = data.get("reference_category")
         spec.all_train_categories = data.get("all_train_categories", [])
         spec.generated_features = data.get("generated_features", [])
+        spec.has_missing_indicator = data.get("has_missing_indicator", False)
+        spec.missing_indicator_offset = data.get("missing_indicator_offset")
+        spec.cat_to_offset = data.get("cat_to_offset", {})
+        spec.missing_feature_name = data.get("missing_feature_name")
+        # Legacy fallback if cat_to_offset was not serialized
+        if not spec.cat_to_offset and spec.col_type == "categorical":
+            offset = 0
+            for cat in spec.categories:
+                if cat != "_missing_":
+                    spec.cat_to_offset[cat] = offset
+                    offset += 1
+                else:
+                    spec.has_missing_indicator = True
+                    spec.missing_indicator_offset = offset
+                    offset += 1
         return spec
 
 
@@ -104,12 +127,32 @@ class TablePreprocessorScratch:
         row_numbers: list[int] | None = None,
     ) -> TablePreprocessorScratch:
         """Fit preprocessor strictly on the training partition rows."""
+    def _make_unique_feature_name(self, candidate: str) -> str:
+        """Ensure every generated feature name is strictly unique across the entire model."""
+        if candidate not in self._all_feature_names_set:
+            self._all_feature_names_set.add(candidate)
+            return candidate
+        counter = 1
+        while f"{candidate}#{counter}" in self._all_feature_names_set:
+            counter += 1
+        unique_name = f"{candidate}#{counter}"
+        self._all_feature_names_set.add(unique_name)
+        return unique_name
+
+    def fit(
+        self,
+        raw_train_rows: list[list[Any]],
+        start_row: int = 2,
+        row_numbers: list[int] | None = None,
+    ) -> TablePreprocessorScratch:
+        """Fit preprocessor strictly on the training partition rows."""
         if not raw_train_rows:
             raise ValueError("Cannot fit TablePreprocessorScratch on empty rows.")
 
         self.column_specs = []
         self.generated_feature_names = []
         self.feature_to_source_map = []
+        self._all_feature_names_set: set[str] = set()
 
         num_rows = len(raw_train_rows)
 
@@ -168,7 +211,7 @@ class TablePreprocessorScratch:
                 else:
                     spec.impute_value = float(np.median(num_vals))
 
-                feat_name = header
+                feat_name = self._make_unique_feature_name(header)
                 spec.generated_features = [feat_name]
                 self.generated_feature_names.append(feat_name)
                 self.feature_to_source_map.append(col_idx)
@@ -191,7 +234,7 @@ class TablePreprocessorScratch:
                     bool_vals.append(bf)
                 spec.impute_value = 1.0 if (bool_vals and np.mean(bool_vals) >= 0.5) else 0.0
 
-                feat_name = header
+                feat_name = self._make_unique_feature_name(header)
                 spec.generated_features = [feat_name]
                 self.generated_feature_names.append(feat_name)
                 self.feature_to_source_map.append(col_idx)
@@ -209,9 +252,6 @@ class TablePreprocessorScratch:
                             f"Column '{header}' (row {excel_row}) contains invalid error/object cell: {repr(v)}"
                         )
                     clean_cat = str(v).strip()
-                    # Escape literal category text "_missing_" to prevent collision with missing indicator
-                    if clean_cat == "_missing_":
-                        clean_cat = r"\_missing\_"
                     cat_counts[clean_cat] = cat_counts.get(clean_cat, 0) + 1
 
                 if len(cat_counts) > self.category_max_cardinality:
@@ -223,25 +263,54 @@ class TablePreprocessorScratch:
                 sorted_cats = sorted(cat_counts.keys(), key=lambda c: (-cat_counts[c], c))
 
                 if not sorted_cats:
-                    spec.reference_category = "_missing_"
-                    spec.categories = []
-                    spec.all_train_categories = ["_missing_"]
+                    spec.reference_category = None
+                    spec.categories = ["_missing_"]
+                    spec.all_train_categories = []
                     spec.impute_value = "_missing_"
+                    spec.has_missing_indicator = True
+                    spec.missing_indicator_offset = 0
+                    miss_feat = self._make_unique_feature_name(f"{header}=_missing_")
+                    spec.missing_feature_name = miss_feat
+                    spec.generated_features = [miss_feat]
+                    self.generated_feature_names.append(miss_feat)
+                    self.feature_to_source_map.append(col_idx)
                 else:
                     spec.reference_category = sorted_cats[0]
-                    # Always reserve distinct missing indicator in active categories, even if training had no blanks
-                    spec.categories = list(sorted_cats[1:]) + ["_missing_"]
-                    spec.all_train_categories = list(sorted_cats) + ["_missing_"]
-                    spec.impute_value = "_missing_"
+                    active_cats = list(sorted_cats[1:])
+                    spec.all_train_categories = list(sorted_cats)
+                    spec.impute_value = spec.reference_category
+                    spec.has_missing_indicator = True  # reserve missing indicator for unseen blanks/imputation
 
-                generated_for_col: list[str] = []
-                for cat in spec.categories:
-                    col_feat_name = f"{header}={cat}"
-                    generated_for_col.append(col_feat_name)
-                    self.generated_feature_names.append(col_feat_name)
-                    self.feature_to_source_map.append(col_idx)
+                    generated_for_col: list[str] = []
+                    spec.cat_to_offset = {}
+                    curr_offset = 0
+                    for cat in active_cats:
+                        spec.cat_to_offset[cat] = curr_offset
+                        curr_offset += 1
+                        feat_name = self._make_unique_feature_name(f"{header}={cat}")
+                        generated_for_col.append(feat_name)
+                        self.generated_feature_names.append(feat_name)
+                        self.feature_to_source_map.append(col_idx)
 
-                spec.generated_features = generated_for_col
+                    if spec.has_missing_indicator:
+                        spec.missing_indicator_offset = curr_offset
+                        curr_offset += 1
+                        # Candidate feature name for missingness
+                        cand_miss = f"{header}=_missing_"
+                        if cand_miss in self._all_feature_names_set:
+                            cand_miss = f"{header}=<missing>"
+                        feat_name = self._make_unique_feature_name(cand_miss)
+                        spec.missing_feature_name = feat_name
+                        generated_for_col.append(feat_name)
+                        self.generated_feature_names.append(feat_name)
+                        self.feature_to_source_map.append(col_idx)
+
+                    if "_missing_" in active_cats or spec.reference_category == "_missing_":
+                        spec.categories = list(active_cats)
+                    else:
+                        spec.categories = list(active_cats) + ["_missing_"]
+
+                    spec.generated_features = generated_for_col
 
             self.column_specs.append(spec)
 
@@ -251,20 +320,20 @@ class TablePreprocessorScratch:
         self.is_fitted = True
         return self
 
-    def transform(
+    def _transform_internal(
         self,
         raw_rows: list[list[Any]],
         start_row: int = 2,
         row_numbers: list[int] | None = None,
-    ) -> np.ndarray:
-        """Transform raw heterogeneous rows into a 2D float NumPy matrix using fitted parameters."""
+    ) -> tuple[np.ndarray, list[str]]:
+        """Transform raw rows into matrix and compute request-local warnings without mutating fitted state."""
         if not self.is_fitted:
             raise ValueError("TablePreprocessorScratch must be fitted before calling transform.")
 
         num_rows = len(raw_rows)
         num_features = len(self.generated_feature_names)
         if num_rows == 0:
-            return np.empty((0, num_features), dtype=float)
+            return np.empty((0, num_features), dtype=float), []
 
         output = np.zeros((num_rows, num_features), dtype=float)
         unseen_categories: set[str] = set()
@@ -318,42 +387,62 @@ class TablePreprocessorScratch:
                 feat_idx += 1
 
             elif spec.col_type == "categorical":
-                cat_to_feat_offset = {cat: offset for offset, cat in enumerate(spec.categories)}
-                k_cols = len(spec.categories)
-
+                k_cols = len(spec.generated_features)
                 for r in range(num_rows):
                     v = col_vals[r]
                     excel_row = row_numbers[r] if row_numbers is not None and r < len(row_numbers) else start_row + r
                     if is_missing(v):
                         imputed_cell_count += 1
-                        if "_missing_" in cat_to_feat_offset:
-                            output[r, feat_idx + cat_to_feat_offset["_missing_"]] = 1.0
+                        if spec.has_missing_indicator and spec.missing_indicator_offset is not None:
+                            output[r, feat_idx + spec.missing_indicator_offset] = 1.0
                     else:
                         if is_invalid(v):
                             raise ValueError(
                                 f"Column '{spec.source_header}' (row {excel_row}) contains invalid error/object cell: {repr(v)}"
                             )
                         raw_str = str(v).strip()
-                        clean_cat = r"\_missing\_" if raw_str == "_missing_" else raw_str
-                        if clean_cat == spec.reference_category:
+                        if raw_str == spec.reference_category:
                             # Reference level: all indicators 0
                             pass
-                        elif clean_cat in cat_to_feat_offset:
-                            output[r, feat_idx + cat_to_feat_offset[clean_cat]] = 1.0
+                        elif raw_str in spec.cat_to_offset:
+                            output[r, feat_idx + spec.cat_to_offset[raw_str]] = 1.0
                         else:
                             # Unseen category: all indicators 0 + warning
                             unseen_categories.add(f"{spec.source_header}='{raw_str}'")
 
                 feat_idx += k_cols
 
-        self.last_transform_warnings = []
+        warnings: list[str] = []
         if unseen_categories:
-            self.last_transform_warnings.append(
+            warnings.append(
                 f"Observed {len(unseen_categories)} unseen categories in data: {', '.join(sorted(unseen_categories)[:5])}. "
                 "These were mapped to baseline indicators."
             )
 
-        return output
+        return output, warnings
+
+    def transform_with_warnings(
+        self,
+        raw_rows: list[list[Any]],
+        start_row: int = 2,
+        row_numbers: list[int] | None = None,
+    ) -> tuple[np.ndarray, list[str]]:
+        """Transform raw heterogeneous rows into float matrix and return request-local warnings (thread-safe)."""
+        return self._transform_internal(raw_rows, start_row=start_row, row_numbers=row_numbers)
+
+    def transform(
+        self,
+        raw_rows: list[list[Any]],
+        start_row: int = 2,
+        row_numbers: list[int] | None = None,
+        return_warnings: bool = False,
+    ) -> np.ndarray | tuple[np.ndarray, list[str]]:
+        """Transform raw heterogeneous rows into a 2D float NumPy matrix using fitted parameters."""
+        output, warnings = self._transform_internal(raw_rows, start_row=start_row, row_numbers=row_numbers)
+        if not return_warnings:
+            self.last_transform_warnings = list(warnings)
+            return output
+        return output, warnings
 
     def transform_single(self, raw_row: dict[str, Any] | list[Any]) -> tuple[np.ndarray, list[dict[str, Any]]]:
         """Transform a single raw row (dict of {header: val} or list) and return step-by-step breakdown."""
@@ -371,7 +460,7 @@ class TablePreprocessorScratch:
         else:
             row_list = list(raw_row)
 
-        mat = self.transform([row_list], start_row=1)
+        mat, _ = self.transform_with_warnings([row_list], start_row=1)
         row_vec = mat[0]
 
         # Build explanation breakdown
@@ -393,14 +482,13 @@ class TablePreprocessorScratch:
                 })
                 feat_idx += 1
             elif spec.col_type == "categorical":
-                clean_v = str(val).strip() if not is_missing(val) else None
-                for cat in spec.categories:
-                    f_name = f"{spec.source_header}={cat}"
+                val_miss = is_missing(val)
+                for f_name in spec.generated_features:
                     breakdown.append({
                         "feature_name": f_name,
                         "source_header": spec.source_header,
                         "raw_input": val,
-                        "imputed": is_missing(val),
+                        "imputed": val_miss,
                         "encoded_value": float(row_vec[feat_idx]),
                         "type": "categorical",
                         "reference": spec.reference_category,

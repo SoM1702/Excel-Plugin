@@ -6,7 +6,8 @@
  * and robust export reporting to new Excel worksheets.
  */
 
-const DEFAULT_BACKEND = "https://localhost:8000";
+const DEFAULT_BACKEND =
+  globalThis.EXCEL_LOGISTIC_REGRESSION_CONFIG?.backendUrl || "https://localhost:8000";
 const REQUEST_TIMEOUT_MS = 30000;
 
 let BACKEND_URL = localStorage.getItem("lr_backend_url") || DEFAULT_BACKEND;
@@ -742,13 +743,23 @@ function isOverlap(a, b) {
   );
 }
 
+function normalizeHeader(header) {
+  if (header == null) return "";
+  return String(header).trim().replace(/\s+/g, " ").toLowerCase();
+}
+
 function validateHeaderRow(headerRow) {
   const names = headerRow.map((cell) => (isBlank(cell) ? "" : String(cell).trim()));
   if (names.some((name) => !name)) {
     throw new Error("Feature headers cannot be blank.");
   }
-  if (new Set(names).size !== names.length) {
-    throw new Error("Feature headers must be unique.");
+  const seen = new Map();
+  for (const name of names) {
+    const norm = normalizeHeader(name);
+    if (seen.has(norm)) {
+      throw new Error("Feature headers must be unique.");
+    }
+    seen.set(norm, name);
   }
   return names;
 }
@@ -1297,6 +1308,28 @@ async function runTableTraining() {
     return;
   }
 
+  // Validate selected columns for duplicate or case/whitespace-equivalent headers
+  const seenFeatureNorms = new Map();
+  for (const colIdx of selectedX) {
+    const h = (TABLE_HEADERS && TABLE_HEADERS[colIdx] != null) ? String(TABLE_HEADERS[colIdx]).trim() : `Column_${colIndexToLetter(colIdx)}`;
+    const norm = normalizeHeader(h);
+    if (seenFeatureNorms.has(norm)) {
+      showError(`Selected feature headers must be unique: ambiguous or duplicate header "${h}" detected.`);
+      return;
+    }
+    seenFeatureNorms.set(norm, h);
+  }
+
+  // Check if outcome column collides with any selected feature column
+  const yHeader = (typeof yColumn === "number" && TABLE_HEADERS && yColumn < TABLE_HEADERS.length)
+    ? TABLE_HEADERS[yColumn]
+    : String(yColumn);
+  const yNorm = normalizeHeader(yHeader);
+  if (seenFeatureNorms.has(yNorm)) {
+    showError(`Outcome column "${yHeader}" cannot also be selected as an input feature.`);
+    return;
+  }
+
   const button = document.getElementById("run-btn");
   button.disabled = true;
   button.textContent = "Fitting scratch model…";
@@ -1518,6 +1551,7 @@ function setMetric(id, value) {
 }
 
 function renderResults(result) {
+  if (!LAST_RESULT) LAST_RESULT = result;
   document.getElementById("results").classList.remove("hidden");
   const evaluation = result.evaluation;
   const split = result.split;
@@ -2059,6 +2093,17 @@ function updateConfusion(threshold) {
   document.getElementById("t-f1").textContent = f1.toFixed(3);
 }
 
+function manualWhatIfInputCount(result) {
+  if (!result) return 0;
+  if (result.table_mode && result.table_metadata && Array.isArray(result.table_metadata.column_specs)) {
+    return result.table_metadata.column_specs.length;
+  }
+  if (Array.isArray(result.feature_names)) {
+    return result.feature_names.length;
+  }
+  return 0;
+}
+
 function invalidateWhatIfExplanation() {
   if (LAST_RESULT) {
     LAST_RESULT._lastWhatIf = null;
@@ -2067,6 +2112,24 @@ function invalidateWhatIfExplanation() {
   const resultBox = document.getElementById("whatif-result");
   if (resultBox) {
     resultBox.classList.add("hidden");
+  }
+  const prepNotes = document.getElementById("whatif-prep-notes");
+  if (prepNotes) {
+    prepNotes.textContent = "";
+  }
+  const warnEl = document.getElementById("whatif-warning");
+  if (warnEl) {
+    warnEl.textContent = "";
+    warnEl.classList.add("hidden");
+  }
+  const unavailEl = document.getElementById("whatif-unavailable-msg");
+  if (unavailEl) {
+    unavailEl.textContent = "";
+    unavailEl.classList.add("hidden");
+  }
+  const workedCard = document.getElementById("whatif-worked-card");
+  if (workedCard) {
+    workedCard.classList.remove("hidden");
   }
 }
 
@@ -2099,22 +2162,42 @@ function buildWhatIf(featureNames) {
   const box = document.getElementById("whatif-inputs");
   box.textContent = "";
   const whatIfBtn = document.getElementById("whatif-btn");
+  const limitNote = document.getElementById("whatif-limit-note");
 
-  if (LAST_RESULT && LAST_RESULT.table_mode && LAST_RESULT.table_metadata) {
+  const targetResult = (LAST_RESULT && (LAST_RESULT.table_mode || (LAST_RESULT.feature_names && LAST_RESULT.feature_names.length)))
+    ? LAST_RESULT
+    : (Array.isArray(featureNames) ? { feature_names: featureNames } : null);
+  const inputCount = manualWhatIfInputCount(targetResult);
+  const isTable = Boolean(targetResult && targetResult.table_mode && targetResult.table_metadata);
+  const unitLabel = isTable ? "source columns" : "numeric features";
+
+  if (inputCount > 25) {
+    const note = document.createElement("p");
+    note.className = "muted small";
+    note.textContent = isTable
+      ? `Manual what-if inputs are limited to models with 25 or fewer source columns (this model has ${inputCount}). Use "Score new rows" below to score single or multiple rows.`
+      : `Manual what-if inputs are limited to models with 25 or fewer features (this model has ${inputCount}). Use "Score new rows" below to score single or multiple rows with all ${inputCount} features.`;
+    box.appendChild(note);
+
+    if (limitNote) {
+      limitNote.textContent = `Manual what-if inputs are limited to models with 25 or fewer ${unitLabel} (this model has ${inputCount}). Use "Score new rows" below to score single or multiple rows.`;
+      limitNote.classList.remove("hidden");
+    }
+    if (whatIfBtn) whatIfBtn.disabled = true;
+    invalidateWhatIfExplanation();
+    return;
+  }
+
+  if (limitNote) {
+    limitNote.textContent = "";
+    limitNote.classList.add("hidden");
+  }
+  if (whatIfBtn && LAST_RESULT && !LAST_RESULT._stale) {
+    whatIfBtn.disabled = false;
+  }
+
+  if (isTable) {
     const colSpecs = LAST_RESULT.table_metadata.column_specs || [];
-    if (colSpecs.length > 25) {
-      const note = document.createElement("p");
-      note.className = "muted small";
-      note.textContent = `Manual what-if inputs are limited to models with 25 or fewer source features (this model has ${colSpecs.length}). Use "Score new rows" below to score single or multiple rows.`;
-      box.appendChild(note);
-      if (whatIfBtn) whatIfBtn.disabled = true;
-      invalidateWhatIfExplanation();
-      return;
-    }
-    if (whatIfBtn && !LAST_RESULT._stale) {
-      whatIfBtn.disabled = false;
-    }
-
     colSpecs.forEach((spec) => {
       const headerName = spec.source_header || spec.header;
       const colIndex = spec.source_index != null ? spec.source_index : spec.index;
@@ -2133,17 +2216,22 @@ function buildWhatIf(featureNames) {
 
         const defOpt = document.createElement("option");
         defOpt.value = "";
-        defOpt.textContent = `(Missing / Default: ${spec.reference_category || "Reference"})`;
+        defOpt.textContent = "(Missing / Blank)";
         select.appendChild(defOpt);
 
-        const catsToDisplay = spec.all_train_categories || spec.vocabulary || spec.categories || [];
+        const isLegacySchema = spec.has_missing_indicator === undefined;
+        let catsToDisplay = spec.all_train_categories || spec.vocabulary || spec.categories || [];
+        if (spec.reference_category && !catsToDisplay.includes(spec.reference_category)) {
+          catsToDisplay = [spec.reference_category, ...catsToDisplay];
+        }
         catsToDisplay.forEach((cat) => {
-          if (cat === "_missing_") return;
+          if (isLegacySchema && cat === "_missing_") return;
           const opt = document.createElement("option");
           opt.value = cat;
           opt.textContent = `${cat}${cat === spec.reference_category ? " (Ref)" : ""}`;
           select.appendChild(opt);
         });
+
 
         select.addEventListener("change", invalidateWhatIfExplanation);
         label.appendChild(select);
@@ -2188,19 +2276,8 @@ function buildWhatIf(featureNames) {
     return;
   }
 
-  if (featureNames.length > 25) {
-    const note = document.createElement("p");
-    note.className = "muted small";
-    note.textContent = `Manual what-if inputs are limited to models with 25 or fewer features (this model has ${featureNames.length}). Use "Score new rows" below to score single or multiple rows with all ${featureNames.length} features.`;
-    box.appendChild(note);
-    if (whatIfBtn) whatIfBtn.disabled = true;
-    invalidateWhatIfExplanation();
-    return;
-  }
-  if (whatIfBtn && LAST_RESULT && !LAST_RESULT._stale) {
-    whatIfBtn.disabled = false;
-  }
-  featureNames.forEach((name) => {
+  const names = featureNames || [];
+  names.forEach((name) => {
     const label = document.createElement("label");
     const caption = document.createElement("span");
     const input = document.createElement("input");
@@ -2243,6 +2320,100 @@ function readWhatIfRow() {
     if (!Number.isFinite(val)) throw new Error(input.dataset.feature + " must be a finite number.");
     return val;
   });
+}
+
+function stableSigmoid(z) {
+  if (z >= 0) {
+    return 1.0 / (1.0 + Math.exp(-z));
+  }
+  const ez = Math.exp(z);
+  return ez / (1.0 + ez);
+}
+
+function validateTableExplanationContract(explanation, backendScore, backendProb, expectedFeatureNames) {
+  if (!explanation || typeof explanation !== "object") {
+    return { valid: false, reason: "No explanation payload received from model." };
+  }
+  if (!explanation.math_valid) {
+    return { valid: false, reason: "Model flagged mathematical validity as false." };
+  }
+  if (!Array.isArray(explanation.features)) {
+    return { valid: false, reason: "Explanation features list is missing or invalid." };
+  }
+  const features = explanation.features;
+  const expectedNames = Array.isArray(expectedFeatureNames) ? expectedFeatureNames : [];
+  if (expectedNames.length > 0 && features.length !== expectedNames.length) {
+    return {
+      valid: false,
+      reason: `Feature count mismatch: expected ${expectedNames.length} features, got ${features.length}.`,
+    };
+  }
+  for (let j = 0; j < features.length; j++) {
+    const f = features[j];
+    if (!f || typeof f !== "object") {
+      return { valid: false, reason: `Feature item at index ${j} is invalid.` };
+    }
+    if (expectedNames.length > 0 && f.feature !== expectedNames[j]) {
+      return {
+        valid: false,
+        reason: `Feature order mismatch at index ${j}: expected '${expectedNames[j]}', got '${f.feature}'.`,
+      };
+    }
+    if (!Number.isFinite(f.raw_value)) {
+      return { valid: false, reason: `Non-finite raw value for feature '${f.feature}'.` };
+    }
+    if (!Number.isFinite(f.scaled_value)) {
+      return { valid: false, reason: `Non-finite scaled value for feature '${f.feature}'.` };
+    }
+    if (!Number.isFinite(f.weight)) {
+      return { valid: false, reason: `Non-finite weight for feature '${f.feature}'.` };
+    }
+    if (!Number.isFinite(f.contribution)) {
+      return { valid: false, reason: `Non-finite contribution for feature '${f.feature}'.` };
+    }
+  }
+
+  const intercept = explanation.intercept;
+  if (!Number.isFinite(intercept)) {
+    return { valid: false, reason: "Non-finite intercept in explanation." };
+  }
+
+  const sumContributions = features.reduce((acc, f) => acc + f.contribution, 0);
+  if (!Number.isFinite(sumContributions)) {
+    return { valid: false, reason: "Non-finite sum of contributions." };
+  }
+
+  if (Number.isFinite(explanation.sum_contributions) && Math.abs(explanation.sum_contributions - sumContributions) > 1e-6) {
+    return {
+      valid: false,
+      reason: `Internal sum_contributions mismatch in explanation payload.`,
+    };
+  }
+
+  const arithmeticScore = sumContributions + intercept;
+  if (Math.abs(arithmeticScore - backendScore) > 1e-6) {
+    return {
+      valid: false,
+      reason: `Arithmetic sum Σ(w·x̂) + b (${arithmeticScore.toFixed(6)}) does not match returned score (${backendScore.toFixed(6)}) within 1e-6 tolerance.`,
+    };
+  }
+
+  const clientProb = stableSigmoid(backendScore);
+  if (Math.abs(clientProb - backendProb) > 1e-6) {
+    return {
+      valid: false,
+      reason: `Sigmoid of score σ(${backendScore.toFixed(6)}) (${clientProb.toFixed(6)}) does not match returned probability (${backendProb.toFixed(6)}) within 1e-6 tolerance.`,
+    };
+  }
+
+  if (Number.isFinite(explanation.probability) && Math.abs(explanation.probability - backendProb) > 1e-6) {
+    return {
+      valid: false,
+      reason: `Explanation probability (${explanation.probability.toFixed(6)}) does not match returned probability (${backendProb.toFixed(6)}) within 1e-6 tolerance.`,
+    };
+  }
+
+  return { valid: true, sumContributions, intercept };
 }
 
 async function runWhatIf() {
@@ -2289,6 +2460,7 @@ async function runWhatIf() {
             headers: sourceHeaders,
             rows: [rawRow],
             threshold: snapshot._activeThreshold,
+            explain: true,
           }),
         },
         REQUEST_TIMEOUT_MS,
@@ -2349,55 +2521,126 @@ async function runWhatIf() {
         `Predicted class at threshold ${currentThreshold.toFixed(2)}: ${classLabel}.`;
     }
 
-    let contributions = [];
-    let sumContributions = 0;
-    const params = LAST_RESULT.parameters || {};
-    const bModel = params.intercept_model_space ?? 0;
-    let arithmeticDiff = 0;
-    let hasDiscrepancy = false;
-
+    const workedCard = document.getElementById("whatif-worked-card");
+    const unavailableEl = document.getElementById("whatif-unavailable-msg");
     const tbody = document.querySelector("#whatif-table tbody");
     if (tbody) {
       tbody.textContent = "";
-      if (snapshot.table_mode && snapshot.table_metadata) {
-        const specs = snapshot.table_metadata.column_specs || [];
-        specs.slice(0, 25).forEach((spec, i) => {
-          const val = rowValues[i];
-          const tr = document.createElement("tr");
-          const tdName = document.createElement("td");
-          tdName.textContent = spec.source_header || spec.header;
-          const tdRaw = document.createElement("td");
-          tdRaw.textContent = val !== null && val !== undefined ? String(val) : "(missing)";
-          const tdScaled = document.createElement("td");
-          tdScaled.textContent = spec.col_type;
-          const tdW = document.createElement("td");
-          tdW.textContent = spec.col_type === "categorical" ? `ref: ${spec.reference_category || "base"}` : (spec.impute_value != null ? `med: ${spec.impute_value}` : "–");
-          const tdContrib = document.createElement("td");
-          tdContrib.textContent = "–";
-          tr.appendChild(tdName);
-          tr.appendChild(tdRaw);
-          tr.appendChild(tdScaled);
-          tr.appendChild(tdW);
-          tr.appendChild(tdContrib);
-          tbody.appendChild(tr);
-        });
+    }
+    const stepsBox = document.getElementById("whatif-calculation-steps");
+    if (stepsBox) {
+      stepsBox.textContent = "";
+    }
+    const prepNotesEl = document.getElementById("whatif-prep-notes");
+    if (prepNotesEl) {
+      prepNotesEl.textContent = "";
+    }
+
+    let isExplanationAvailable = false;
+    let unavailableReasonText = "";
+    let contributions = [];
+    let sumContributions = 0;
+    let bModel = 0;
+    let hasDiscrepancy = false;
+    let mathErrorMessage = "";
+
+    if (snapshot.table_mode && snapshot.table_metadata) {
+      const explanation = result.explanation || data.explanation;
+      const explanationUnavailableReason = result.explanation_unavailable || data.explanation_unavailable;
+
+      if (explanationUnavailableReason) {
+        isExplanationAvailable = false;
+        unavailableReasonText = explanationUnavailableReason;
+      } else if (!explanation) {
+        isExplanationAvailable = false;
+        unavailableReasonText = "Explanation unavailable.";
       } else {
-        const featureNames = LAST_RESULT.feature_names || [];
-        const wModel = params.weights_model_space || [];
-        const means = params.feature_means;
-        const scales = params.feature_scales;
-        const isStd = Boolean(params.standardized && means && scales);
+        const expectedFeatures = snapshot.feature_names || (snapshot.table_metadata && snapshot.table_metadata.generated_feature_names) || [];
+        const validation = validateTableExplanationContract(explanation, backendScore, backendProb, expectedFeatures);
+        if (!validation.valid) {
+          isExplanationAvailable = false;
+          unavailableReasonText = `Explanation unavailable: ${validation.reason}`;
+        } else {
+          isExplanationAvailable = true;
+          sumContributions = validation.sumContributions;
+          bModel = validation.intercept;
+          contributions = (explanation.features || []).map((f) => f.contribution);
 
-        featureNames.slice(0, 25).forEach((name, j) => {
-          const xRaw = rowValues[j];
-          const mean = isStd ? means[j] : 0;
-          const scale = isStd ? scales[j] : 1;
-          const xScaled = isStd ? (xRaw - mean) / scale : xRaw;
-          const w = wModel[j] ?? 0;
-          const contrib = w * xScaled;
-          contributions.push(contrib);
-          sumContributions += contrib;
+          if (tbody) {
+            const featureItems = explanation.features || [];
+            featureItems.slice(0, 25).forEach((item) => {
+              const tr = document.createElement("tr");
+              const tdName = document.createElement("td");
+              tdName.textContent = item.feature;
+              const tdRaw = document.createElement("td");
+              tdRaw.textContent = Number.isFinite(item.raw_value) ? item.raw_value.toFixed(4) : String(item.raw_value);
+              const tdScaled = document.createElement("td");
+              tdScaled.textContent = explanation.standardized && Number.isFinite(item.scaled_value) ? item.scaled_value.toFixed(4) : "–";
+              const tdW = document.createElement("td");
+              tdW.textContent = Number.isFinite(item.weight) ? item.weight.toFixed(4) : "0.0000";
+              const tdContrib = document.createElement("td");
+              tdContrib.textContent = (item.contribution >= 0 ? "+" : "") + item.contribution.toFixed(4);
 
+              tr.appendChild(tdName);
+              tr.appendChild(tdRaw);
+              tr.appendChild(tdScaled);
+              tr.appendChild(tdW);
+              tr.appendChild(tdContrib);
+              tbody.appendChild(tr);
+            });
+
+            if (featureItems.length > 25) {
+              const trMore = document.createElement("tr");
+              const tdMore = document.createElement("td");
+              tdMore.colSpan = 5;
+              tdMore.className = "muted small";
+              tdMore.textContent = `Showing first 25 of ${featureItems.length} features. Complete mathematical sum above includes all ${featureItems.length} features.`;
+              trMore.appendChild(tdMore);
+              tbody.appendChild(trMore);
+            }
+          }
+
+          if (prepNotesEl && explanation.preparation_notes && explanation.preparation_notes.length > 0) {
+            const title = document.createElement("div");
+            title.className = "step-label";
+            title.style.marginTop = "6px";
+            title.style.marginBottom = "4px";
+            title.textContent = "Data preparation details:";
+            prepNotesEl.appendChild(title);
+
+            const ul = document.createElement("ul");
+            ul.style.margin = "0";
+            ul.style.paddingLeft = "18px";
+            explanation.preparation_notes.forEach((noteText) => {
+              const li = document.createElement("li");
+              li.textContent = noteText;
+              ul.appendChild(li);
+            });
+            prepNotesEl.appendChild(ul);
+          }
+        }
+      }
+    } else {
+      // Numeric mode
+      const params = LAST_RESULT.parameters || {};
+      bModel = params.intercept_model_space ?? 0;
+      const featureNames = LAST_RESULT.feature_names || [];
+      const wModel = params.weights_model_space || [];
+      const means = params.feature_means;
+      const scales = params.feature_scales;
+      const isStd = Boolean(params.standardized && means && scales);
+
+      featureNames.slice(0, 25).forEach((name, j) => {
+        const xRaw = rowValues[j];
+        const mean = isStd ? means[j] : 0;
+        const scale = isStd ? scales[j] : 1;
+        const xScaled = isStd ? (xRaw - mean) / scale : xRaw;
+        const w = wModel[j] ?? 0;
+        const contrib = w * xScaled;
+        contributions.push(contrib);
+        sumContributions += contrib;
+
+        if (tbody) {
           const tr = document.createElement("tr");
           const tdName = document.createElement("td");
           tdName.textContent = name;
@@ -2416,35 +2659,52 @@ async function runWhatIf() {
           tr.appendChild(tdW);
           tr.appendChild(tdContrib);
           tbody.appendChild(tr);
-        });
+        }
+      });
 
-        arithmeticDiff = Math.abs(sumContributions + bModel - backendScore);
-        hasDiscrepancy = arithmeticDiff > 1e-4;
+      isExplanationAvailable = true;
+      arithmeticDiff = Math.abs(sumContributions + bModel - backendScore);
+      hasDiscrepancy = arithmeticDiff > 1e-4;
+      if (hasDiscrepancy) {
+        mathErrorMessage = `Notice: Arithmetic sum Σ(w·x̂) + b (${(sumContributions + bModel).toFixed(6)}) differs from backend score (${backendScore.toFixed(6)}) by ${arithmeticDiff.toExponential(2)}.`;
       }
     }
 
-    const stepsBox = document.getElementById("whatif-calculation-steps");
-    if (stepsBox) {
-      stepsBox.textContent = "";
-      const step1 = document.createElement("div");
-      step1.textContent = snapshot.table_mode
-        ? "1. Raw table inputs prepared and encoded by saved pipeline"
-        : `1. Sum of feature contributions: Σ(w_j · x̂_j) = ${sumContributions.toFixed(4)}`;
-      const step2 = document.createElement("div");
-      step2.textContent = `2. Intercept (bias): b = ${bModel.toFixed(4)}`;
-      const step3 = document.createElement("div");
-      step3.textContent = `3. Linear score: z = ${snapshot.table_mode ? backendScore.toFixed(4) : `Σ + b = ${backendScore.toFixed(4)}`}`;
-      const step4 = document.createElement("div");
-      step4.textContent = `4. Sigmoid probability: p = σ(${backendScore.toFixed(4)}) = ${(backendProb * 100).toFixed(2)}% (${backendProb.toFixed(6)})`;
-      const step5 = document.createElement("div");
-      step5.id = "whatif-step-decision";
-      step5.textContent = `5. Decision: p (${backendProb.toFixed(4)}) ${backendProb >= currentThreshold ? "≥" : "<"} threshold (${currentThreshold.toFixed(2)}) → Class ${calculatedPred} (${classLabel})`;
+    if (isExplanationAvailable) {
+      if (workedCard) workedCard.classList.remove("hidden");
+      if (unavailableEl) {
+        unavailableEl.textContent = "";
+        unavailableEl.classList.add("hidden");
+      }
 
-      stepsBox.appendChild(step1);
-      stepsBox.appendChild(step2);
-      stepsBox.appendChild(step3);
-      stepsBox.appendChild(step4);
-      stepsBox.appendChild(step5);
+      if (stepsBox) {
+        const step1 = document.createElement("div");
+        step1.textContent = `1. Sum of feature contributions: Σ(w_j · x̂_j) = ${sumContributions.toFixed(4)}`;
+        const step2 = document.createElement("div");
+        step2.textContent = `2. Intercept (bias): b = ${bModel.toFixed(4)}`;
+        const step3 = document.createElement("div");
+        step3.textContent = `3. Linear score: z = Σ + b = ${backendScore.toFixed(4)}`;
+        const step4 = document.createElement("div");
+        step4.textContent = `4. Sigmoid probability: p = σ(${backendScore.toFixed(4)}) = ${(backendProb * 100).toFixed(2)}% (${backendProb.toFixed(6)})`;
+        const step5 = document.createElement("div");
+        step5.id = "whatif-step-decision";
+        step5.textContent = `5. Decision: p (${backendProb.toFixed(4)}) ${backendProb >= currentThreshold ? "≥" : "<"} threshold (${currentThreshold.toFixed(2)}) → Class ${calculatedPred} (${classLabel})`;
+
+        stepsBox.appendChild(step1);
+        stepsBox.appendChild(step2);
+        stepsBox.appendChild(step3);
+        stepsBox.appendChild(step4);
+        stepsBox.appendChild(step5);
+      }
+    } else {
+      if (workedCard) workedCard.classList.add("hidden");
+      if (unavailableEl) {
+        unavailableEl.textContent = unavailableReasonText || "Explanation unavailable.";
+        unavailableEl.classList.remove("hidden");
+      }
+      if (tbody) tbody.textContent = "";
+      if (stepsBox) stepsBox.textContent = "";
+      if (prepNotesEl) prepNotesEl.textContent = "";
     }
 
     let warnEl = document.getElementById("whatif-warning");
@@ -2456,7 +2716,7 @@ async function runWhatIf() {
         const resultBox = document.getElementById("whatif-result");
         if (resultBox) resultBox.insertBefore(warnEl, resultBox.firstChild);
       }
-      warnEl.textContent = `Notice: Arithmetic sum Σ(w·x̂) + b (${(sumContributions + bModel).toFixed(6)}) differs from backend score (${backendScore.toFixed(6)}) by ${arithmeticDiff.toExponential(2)}.`;
+      warnEl.textContent = mathErrorMessage;
       warnEl.classList.remove("hidden");
     } else if (warnEl) {
       warnEl.textContent = "";
@@ -2468,9 +2728,10 @@ async function runWhatIf() {
       prob: backendProb,
       score: backendScore,
       pred: calculatedPred,
-      contributions,
-      sumContributions,
-      b: bModel,
+      explanation_available: isExplanationAvailable,
+      contributions: isExplanationAvailable ? contributions : [],
+      sumContributions: isExplanationAvailable ? sumContributions : null,
+      b: isExplanationAvailable ? bModel : null,
     };
     LAST_RESULT._lastWhatIfProb = backendProb;
 
@@ -2488,7 +2749,8 @@ async function runWhatIf() {
     }
   } finally {
     if (whatIfBtn) {
-      whatIfBtn.disabled = !LAST_RESULT || LAST_RESULT._stale || (LAST_RESULT?.feature_names?.length || 0) > 25;
+      const inputCount = manualWhatIfInputCount(LAST_RESULT);
+      whatIfBtn.disabled = !LAST_RESULT || LAST_RESULT._stale || inputCount > 25;
       whatIfBtn.textContent = "Calculate probability";
     }
   }
@@ -3690,9 +3952,22 @@ function setModelActionsEnabled(enabled) {
   if (exportWeightsBtn) exportWeightsBtn.disabled = !enabled;
   document.getElementById("writeback-btn").disabled = !enabled;
   const whatIfBtn = document.getElementById("whatif-btn");
+  const limitNote = document.getElementById("whatif-limit-note");
   if (whatIfBtn) {
-    const featureCount = LAST_RESULT?.feature_names?.length || 0;
-    whatIfBtn.disabled = !enabled || featureCount > 25;
+    const inputCount = manualWhatIfInputCount(LAST_RESULT);
+    const countExceeded = inputCount > 25;
+    const isTable = Boolean(LAST_RESULT && LAST_RESULT.table_mode && LAST_RESULT.table_metadata);
+    const unitLabel = isTable ? "source columns" : "numeric features";
+    whatIfBtn.disabled = !enabled || countExceeded;
+    if (limitNote) {
+      if (countExceeded) {
+        limitNote.textContent = `Disabled: manual what-if is limited to models with 25 or fewer ${unitLabel} (this model has ${inputCount}). Use "Score new rows" below.`;
+        limitNote.classList.remove("hidden");
+      } else {
+        limitNote.textContent = "";
+        limitNote.classList.add("hidden");
+      }
+    }
   }
   document.getElementById("score-new-btn").disabled = !enabled;
 }

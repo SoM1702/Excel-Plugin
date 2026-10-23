@@ -82,6 +82,7 @@ function bootTaskPane({ excelContext = null, fetchMock = null } = {}) {
     "cv-note", "inference-note", "coef-chart", "roc-chart", "loss-chart",
     "d-init-loss", "d-final-loss", "d-iters", "d-grad-norm", "diag-status-badge",
     "diag-stop-reason", "whatif-inputs", "whatif-result", "whatif-summary", "whatif-calculation-steps",
+    "whatif-limit-note", "whatif-prep-notes", "whatif-unavailable-msg", "whatif-worked-card",
     "eq-score-text", "eq-sigmoid-text", "eq-decision-text", "eq-unit-note", "param-interp-note",
     "data-preview",
     "params-search", "params-pagination", "params-prev-btn", "params-page-info", "params-next-btn",
@@ -4077,4 +4078,977 @@ test("table profiling and training send start_row and start_col from range addre
   assert.equal(trainBody.start_col, 4);
 });
 
+test("table mode with 14 source columns expanding to >25 features keeps what-if enabled before and after calculation", async () => {
+  const nCols = 14;
+  const colSpecs = Array.from({ length: nCols }, (_, i) => ({
+    source_index: i + 1,
+    source_header: `col_${i + 1}`,
+    col_type: i < 5 ? "categorical" : "numeric",
+    impute_value: i < 5 ? null : 10.0,
+    categories: i < 5 ? ["catA", "catB", "catC", "catD", "_missing_"] : [],
+    all_train_categories: i < 5 ? ["ref", "catA", "catB", "catC", "catD", "_missing_"] : [],
+    reference_category: i < 5 ? "ref" : null,
+    generated_features: i < 5 ? [`col_${i+1}=catA`, `col_${i+1}=catB`, `col_${i+1}=catC`, `col_${i+1}=catD`, `col_${i+1}=_missing_`] : [`col_${i+1}`],
+  }));
+  const genFeatureNames = colSpecs.flatMap((s) => s.generated_features);
+
+  let predictCalled = false;
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      predictCalled = true;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "1", negative: "0" },
+          results: [
+            {
+              score: 0.5,
+              prob: 0.6225,
+              pred: 1,
+              explanation: {
+                math_valid: true,
+                intercept: 0.0,
+                standardized: false,
+                sum_contributions: 0.5,
+                linear_score: 0.5,
+                probability: 0.6225,
+                features: genFeatureNames.map((name) => ({
+                  feature: name,
+                  raw_value: 0.0,
+                  scaled_value: 0.0,
+                  weight: 0.1,
+                  contribution: 0.0,
+                })),
+                preparation_notes: ["Column 'col_1': value 'ref' is reference level"],
+              },
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements } = bootTaskPane({ fetchMock });
+
+  const mockModel = {
+    model_id: "m_wide_table",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["target", ...colSpecs.map((s) => s.source_header)],
+      selected_indices: colSpecs.map((s) => s.source_index),
+      column_specs: colSpecs,
+      generated_feature_names: genFeatureNames,
+    },
+    feature_names: genFeatureNames,
+    class_labels: { positive: "1", negative: "0" },
+    parameters: {
+      weights_model_space: genFeatureNames.map(() => 0.1),
+      intercept_model_space: 0.0,
+      standardized: false,
+      conversion_valid: true,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  // Exactly 14 controls rendered
+  const inputs = context.document.querySelectorAll("#whatif-inputs input, #whatif-inputs select");
+  assert.equal(inputs.length, 14);
+
+  // What-if button must be ENABLED despite >25 generated features
+  assert.equal(elements["whatif-btn"].disabled, false);
+
+  // Run calculation
+  await vm.runInContext("runWhatIf()", context);
+  assert.equal(predictCalled, true);
+
+  // After calculation finishes, button must REMAIN enabled
+  assert.equal(elements["whatif-btn"].disabled, false);
+});
+
+test("table mode with 26 source columns disables what-if with guidance note while score-new-btn remains enabled", async () => {
+  const nCols = 26;
+  const colSpecs = Array.from({ length: nCols }, (_, i) => ({
+    source_index: i + 1,
+    source_header: `feature_${i + 1}`,
+    col_type: "numeric",
+    impute_value: 0.0,
+    categories: [],
+    generated_features: [`feature_${i + 1}`],
+  }));
+
+  const { context, elements } = bootTaskPane();
+
+  const mockModel = {
+    model_id: "m_26_cols",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["target", ...colSpecs.map((s) => s.source_header)],
+      selected_indices: colSpecs.map((s) => s.source_index),
+      column_specs: colSpecs,
+      generated_feature_names: colSpecs.map((s) => s.source_header),
+    },
+    feature_names: colSpecs.map((s) => s.source_header),
+    class_labels: { positive: "1", negative: "0" },
+    parameters: {
+      weights_model_space: colSpecs.map(() => 0.1),
+      intercept_model_space: 0.0,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  // Button disabled
+  assert.equal(elements["whatif-btn"].disabled, true);
+  // Guidance message directs user to "Score new rows" and specifies source columns
+  assert.ok(elements["whatif-inputs"].textContent.includes("25 or fewer source columns"));
+  assert.ok(elements["whatif-inputs"].textContent.includes("Score new rows"));
+  // Batch scoring button remains enabled
+  assert.equal(elements["score-new-btn"].disabled, false);
+});
+
+test("table mode What-If renders truthful feature contributions, scaled values, weights, intercept, and prep notes", async () => {
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "Survived", negative: "Perished" },
+          results: [
+            {
+              score: 0.85,
+              prob: 0.700567,
+              pred: 1,
+              explanation: {
+                math_valid: true,
+                intercept: 0.1,
+                standardized: true,
+                sum_contributions: 0.75,
+                linear_score: 0.85,
+                probability: 0.700567,
+                features: [
+                  { feature: "pclass", raw_value: 1.0, scaled_value: -0.8, weight: -0.5, contribution: 0.4 },
+                  { feature: "sex=female", raw_value: 1.0, scaled_value: 1.0, weight: 0.35, contribution: 0.35 },
+                ],
+                preparation_notes: [
+                  "Column 'age': missing value → imputed with training median (28.0)",
+                  "Column 'sex': value 'female' → active dummy 'sex=female' = 1.0",
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements, whatifTbody } = bootTaskPane({ fetchMock });
+
+  const mockModel = {
+    model_id: "m_truthful_whatif",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["survived", "pclass", "sex"],
+      selected_indices: [1, 2],
+      column_specs: [
+        { source_index: 1, source_header: "pclass", col_type: "numeric", impute_value: 3.0, categories: [], generated_features: ["pclass"] },
+        { source_index: 2, source_header: "sex", col_type: "categorical", reference_category: "male", categories: ["female"], all_train_categories: ["female", "male"], generated_features: ["sex=female"] },
+      ],
+      generated_feature_names: ["pclass", "sex=female"],
+    },
+    feature_names: ["pclass", "sex=female"],
+    class_labels: { positive: "Survived", negative: "Perished" },
+    parameters: {
+      weights_model_space: [-0.5, 0.35],
+      intercept_model_space: 0.1,
+      standardized: true,
+      conversion_valid: true,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  await vm.runInContext("runWhatIf()", context);
+
+  // Result card visible
+  assert.equal(elements["whatif-result"].classList.contains("hidden"), false);
+
+  // Truthful table rows
+  assert.equal(whatifTbody.children.length, 2);
+  const row0 = whatifTbody.children[0];
+  assert.equal(row0.children[0].textContent, "pclass");
+  assert.equal(row0.children[1].textContent, "1.0000");
+  assert.equal(row0.children[2].textContent, "-0.8000");
+  assert.equal(row0.children[3].textContent, "-0.5000");
+  assert.equal(row0.children[4].textContent, "+0.4000");
+
+  const row1 = whatifTbody.children[1];
+  assert.equal(row1.children[0].textContent, "sex=female");
+  assert.equal(row1.children[1].textContent, "1.0000");
+  assert.equal(row1.children[2].textContent, "1.0000");
+  assert.equal(row1.children[3].textContent, "0.3500");
+  assert.equal(row1.children[4].textContent, "+0.3500");
+
+  // Steps
+  const steps = elements["whatif-calculation-steps"].children;
+  assert.ok(steps[0].textContent.includes("0.7500"));
+  assert.ok(steps[1].textContent.includes("0.1000"));
+  assert.ok(steps[2].textContent.includes("0.8500"));
+
+  // Prep notes
+  assert.ok(elements["whatif-prep-notes"].textContent.includes("missing value → imputed with training median"));
+  assert.ok(elements["whatif-prep-notes"].textContent.includes("active dummy"));
+});
+
+test("numeric mode limits manual what-if to 25 features and stale model stays disabled in either mode", () => {
+  const { context, elements } = bootTaskPane();
+
+  // 25 numeric features: enabled
+  const model25 = {
+    model_id: "m_25",
+    table_mode: false,
+    _stale: false,
+    feature_names: Array.from({ length: 25 }, (_, i) => `f_${i}`),
+    parameters: { weights_model_space: Array(25).fill(0.1), intercept_model_space: 0 },
+    class_labels: { positive: "1", negative: "0" },
+  };
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(model25), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+  assert.equal(elements["whatif-btn"].disabled, false);
+
+  // 26 numeric features: disabled
+  const model26 = {
+    model_id: "m_26",
+    table_mode: false,
+    _stale: false,
+    feature_names: Array.from({ length: 26 }, (_, i) => `f_${i}`),
+    parameters: { weights_model_space: Array(26).fill(0.1), intercept_model_space: 0 },
+    class_labels: { positive: "1", negative: "0" },
+  };
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(model26), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+  assert.equal(elements["whatif-btn"].disabled, true);
+  assert.ok(elements["whatif-inputs"].textContent.includes("25 or fewer features"));
+
+  // Stale model in table mode
+  const staleTable = {
+    model_id: "m_stale_table",
+    table_mode: true,
+    _stale: true,
+    table_metadata: {
+      column_specs: [{ source_index: 1, source_header: "c1", col_type: "numeric" }],
+    },
+    feature_names: ["c1"],
+  };
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(staleTable), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  assert.equal(elements["whatif-btn"].disabled, true);
+});
+
+test("table mode What-If with missing explanation hides breakdown and displays explanation unavailable", async () => {
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "Survived", negative: "Perished" },
+          results: [{ score: 0.85, prob: 0.700567, pred: 1 }],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements, whatifTbody } = bootTaskPane({ fetchMock });
+  const mockModel = {
+    model_id: "m_missing_exp",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["survived", "pclass", "sex"],
+      selected_indices: [1, 2],
+      column_specs: [
+        { source_index: 1, source_header: "pclass", col_type: "numeric", impute_value: 3.0, categories: [], generated_features: ["pclass"] },
+        { source_index: 2, source_header: "sex", col_type: "categorical", reference_category: "male", categories: ["female"], all_train_categories: ["female", "male"], generated_features: ["sex=female"] },
+      ],
+      generated_feature_names: ["pclass", "sex=female"],
+    },
+    feature_names: ["pclass", "sex=female"],
+    class_labels: { positive: "Survived", negative: "Perished" },
+    parameters: {
+      weights_model_space: [-0.5, 0.35],
+      intercept_model_space: 0.1,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  await vm.runInContext("runWhatIf()", context);
+
+  // Result box is visible and shows probability
+  assert.equal(elements["whatif-result"].classList.contains("hidden"), false);
+  assert.ok(elements["whatif-summary"].textContent.includes("70.06%"));
+
+  // Worked card, table, steps, and prep notes are hidden/empty (no false breakdown or Σ=0)
+  assert.equal(elements["whatif-worked-card"].classList.contains("hidden"), true);
+  assert.equal(whatifTbody.children.length, 0);
+  assert.equal(elements["whatif-calculation-steps"].textContent, "");
+  assert.equal(elements["whatif-prep-notes"].textContent, "");
+
+  // Explanation unavailable message is shown
+  assert.equal(elements["whatif-unavailable-msg"].classList.contains("hidden"), false);
+  assert.ok(elements["whatif-unavailable-msg"].textContent.includes("Explanation unavailable"));
+});
+
+test("table mode What-If with backend explanation exception displays explanation unavailable with cause", async () => {
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "Survived", negative: "Perished" },
+          explanation_unavailable: "Explanation unavailable: Matrix singular in preprocessing",
+          results: [
+            {
+              score: 0.85,
+              prob: 0.700567,
+              pred: 1,
+              explanation_unavailable: "Explanation unavailable: Matrix singular in preprocessing",
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements, whatifTbody } = bootTaskPane({ fetchMock });
+  const mockModel = {
+    model_id: "m_exp_err",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["survived", "pclass", "sex"],
+      selected_indices: [1, 2],
+      column_specs: [
+        { source_index: 1, source_header: "pclass", col_type: "numeric", impute_value: 3.0, categories: [], generated_features: ["pclass"] },
+        { source_index: 2, source_header: "sex", col_type: "categorical", reference_category: "male", categories: ["female"], all_train_categories: ["female", "male"], generated_features: ["sex=female"] },
+      ],
+      generated_feature_names: ["pclass", "sex=female"],
+    },
+    feature_names: ["pclass", "sex=female"],
+    class_labels: { positive: "Survived", negative: "Perished" },
+    parameters: {
+      weights_model_space: [-0.5, 0.35],
+      intercept_model_space: 0.1,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  await vm.runInContext("runWhatIf()", context);
+
+  // Worked card is hidden, no fake math
+  assert.equal(elements["whatif-worked-card"].classList.contains("hidden"), true);
+  assert.equal(whatifTbody.children.length, 0);
+  assert.equal(elements["whatif-calculation-steps"].textContent, "");
+
+  // Explanation unavailable displays the backend cause
+  assert.equal(elements["whatif-unavailable-msg"].classList.contains("hidden"), false);
+  assert.ok(elements["whatif-unavailable-msg"].textContent.includes("Matrix singular in preprocessing"));
+});
+
+test("table mode What-If with math_valid false hides breakdown and displays explanation unavailable", async () => {
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "Survived", negative: "Perished" },
+          results: [
+            {
+              score: 0.85,
+              prob: 0.700567,
+              pred: 1,
+              explanation: {
+                math_valid: false,
+                intercept: 0.1,
+                sum_contributions: 0.75,
+                features: [
+                  { feature: "pclass", raw_value: 1.0, scaled_value: -0.8, weight: -0.5, contribution: 0.4 },
+                  { feature: "sex=female", raw_value: 1.0, scaled_value: 1.0, weight: 0.35, contribution: 0.35 },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements, whatifTbody } = bootTaskPane({ fetchMock });
+  const mockModel = {
+    model_id: "m_math_invalid",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["survived", "pclass", "sex"],
+      selected_indices: [1, 2],
+      column_specs: [
+        { source_index: 1, source_header: "pclass", col_type: "numeric", impute_value: 3.0, categories: [], generated_features: ["pclass"] },
+        { source_index: 2, source_header: "sex", col_type: "categorical", reference_category: "male", categories: ["female"], all_train_categories: ["female", "male"], generated_features: ["sex=female"] },
+      ],
+      generated_feature_names: ["pclass", "sex=female"],
+    },
+    feature_names: ["pclass", "sex=female"],
+    class_labels: { positive: "Survived", negative: "Perished" },
+    parameters: {
+      weights_model_space: [-0.5, 0.35],
+      intercept_model_space: 0.1,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  await vm.runInContext("runWhatIf()", context);
+
+  assert.equal(elements["whatif-worked-card"].classList.contains("hidden"), true);
+  assert.equal(whatifTbody.children.length, 0);
+  assert.equal(elements["whatif-calculation-steps"].textContent, "");
+  assert.equal(elements["whatif-unavailable-msg"].classList.contains("hidden"), false);
+  assert.ok(elements["whatif-unavailable-msg"].textContent.includes("mathematical validity as false"));
+});
+
+test("table mode What-If with score mismatch hides breakdown and displays explanation unavailable", async () => {
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "Survived", negative: "Perished" },
+          results: [
+            {
+              score: 1.50, // Mismatched score: sum(0.75) + b(0.1) = 0.85 !== 1.50
+              prob: 0.817574,
+              pred: 1,
+              explanation: {
+                math_valid: true,
+                intercept: 0.1,
+                sum_contributions: 0.75,
+                features: [
+                  { feature: "pclass", raw_value: 1.0, scaled_value: -0.8, weight: -0.5, contribution: 0.4 },
+                  { feature: "sex=female", raw_value: 1.0, scaled_value: 1.0, weight: 0.35, contribution: 0.35 },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements, whatifTbody } = bootTaskPane({ fetchMock });
+  const mockModel = {
+    model_id: "m_score_mismatch",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["survived", "pclass", "sex"],
+      selected_indices: [1, 2],
+      column_specs: [
+        { source_index: 1, source_header: "pclass", col_type: "numeric", impute_value: 3.0, categories: [], generated_features: ["pclass"] },
+        { source_index: 2, source_header: "sex", col_type: "categorical", reference_category: "male", categories: ["female"], all_train_categories: ["female", "male"], generated_features: ["sex=female"] },
+      ],
+      generated_feature_names: ["pclass", "sex=female"],
+    },
+    feature_names: ["pclass", "sex=female"],
+    class_labels: { positive: "Survived", negative: "Perished" },
+    parameters: {
+      weights_model_space: [-0.5, 0.35],
+      intercept_model_space: 0.1,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  await vm.runInContext("runWhatIf()", context);
+
+  assert.equal(elements["whatif-worked-card"].classList.contains("hidden"), true);
+  assert.equal(whatifTbody.children.length, 0);
+  assert.equal(elements["whatif-calculation-steps"].textContent, "");
+  assert.equal(elements["whatif-unavailable-msg"].classList.contains("hidden"), false);
+  assert.ok(elements["whatif-unavailable-msg"].textContent.includes("does not match returned score"));
+});
+
+test("table mode What-If with probability mismatch hides breakdown and displays explanation unavailable", async () => {
+  const fetchMock = async (url) => {
+    if (url.endsWith("/predict-table")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          class_labels: { positive: "Survived", negative: "Perished" },
+          results: [
+            {
+              score: 0.85,
+              prob: 0.999999, // Mismatched probability: sigmoid(0.85) ~ 0.700567 != 0.999999
+              pred: 1,
+              explanation: {
+                math_valid: true,
+                intercept: 0.1,
+                sum_contributions: 0.75,
+                features: [
+                  { feature: "pclass", raw_value: 1.0, scaled_value: -0.8, weight: -0.5, contribution: 0.4 },
+                  { feature: "sex=female", raw_value: 1.0, scaled_value: 1.0, weight: 0.35, contribution: 0.35 },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+  };
+
+  const { context, elements, whatifTbody } = bootTaskPane({ fetchMock });
+  const mockModel = {
+    model_id: "m_prob_mismatch",
+    table_mode: true,
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["survived", "pclass", "sex"],
+      selected_indices: [1, 2],
+      column_specs: [
+        { source_index: 1, source_header: "pclass", col_type: "numeric", impute_value: 3.0, categories: [], generated_features: ["pclass"] },
+        { source_index: 2, source_header: "sex", col_type: "categorical", reference_category: "male", categories: ["female"], all_train_categories: ["female", "male"], generated_features: ["sex=female"] },
+      ],
+      generated_feature_names: ["pclass", "sex=female"],
+    },
+    feature_names: ["pclass", "sex=female"],
+    class_labels: { positive: "Survived", negative: "Perished" },
+    parameters: {
+      weights_model_space: [-0.5, 0.35],
+      intercept_model_space: 0.1,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  await vm.runInContext("runWhatIf()", context);
+
+  assert.equal(elements["whatif-worked-card"].classList.contains("hidden"), true);
+  assert.equal(whatifTbody.children.length, 0);
+  assert.equal(elements["whatif-calculation-steps"].textContent, "");
+  assert.equal(elements["whatif-unavailable-msg"].classList.contains("hidden"), false);
+  assert.ok(elements["whatif-unavailable-msg"].textContent.includes("does not match returned probability"));
+});
+
+test("validateHeaderRow rejects duplicate, case-variant, and whitespace-variant headers", () => {
+  const { context } = bootTaskPane();
+
+  // Distinct headers accepted
+  const valid = vm.runInContext("validateHeaderRow(['Age', 'Fare', 'Pclass'])", context);
+  assert.deepEqual(Array.from(valid), ["Age", "Fare", "Pclass"]);
+
+  // Exact duplicate rejected
+  assert.throws(
+    () => vm.runInContext("validateHeaderRow(['Age', 'Fare', 'Age'])", context),
+    /Feature headers must be unique/
+  );
+
+  // Case variant rejected
+  assert.throws(
+    () => vm.runInContext("validateHeaderRow(['Age', 'Fare', 'age'])", context),
+    /Feature headers must be unique/
+  );
+
+  // Whitespace-collapsed variant rejected
+  assert.throws(
+    () => vm.runInContext("validateHeaderRow(['First Name', '  first   name  '])", context),
+    /Feature headers must be unique/
+  );
+
+  // Blank header rejected
+  assert.throws(
+    () => vm.runInContext("validateHeaderRow(['Age', '   ', 'Fare'])", context),
+    /Feature headers cannot be blank/
+  );
+});
+
+test("runTableTraining rejects selected features differing only by case or whitespace", async () => {
+  let trainCalled = false;
+  const fetchMock = async (url) => {
+    if (url.endsWith("/train-table")) {
+      trainCalled = true;
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+
+  const { context, elements } = bootTaskPane({ fetchMock });
+
+  elements["table-range"].value = "Sheet1!A1:C10";
+  vm.runInContext("TABLE_HEADERS = ['survived', 'Age', 'age'];", context);
+  vm.runInContext("TABLE_ROWS = [[1, 20, 20], [0, 30, 30]];", context);
+  vm.runInContext("TABLE_DESCRIPTOR = { rowIndex: 0, columnIndex: 0, values: [] };", context);
+  vm.runInContext("TABLE_PROFILE_DATA = { suggested_y_index: 0 };", context);
+
+  // Set outcome column to survived
+  elements["table-y-select"].value = "0";
+
+  // Simulate checkboxes for both feature columns (index 1 and index 2)
+  const cb1 = element("col-1", "input", "checkbox");
+  cb1.className = "table-col-checkbox";
+  cb1.checked = true;
+  cb1.dataset.colIndex = "1";
+
+  const cb2 = element("col-2", "input", "checkbox");
+  cb2.className = "table-col-checkbox";
+  cb2.checked = true;
+  cb2.dataset.colIndex = "2";
+
+  elements["table-columns-list"].children = [cb1, cb2];
+
+  await vm.runInContext("runTableTraining()", context);
+
+  assert.equal(trainCalled, false, "Training must not be called when ambiguous headers are selected");
+  assert.equal(elements["error-toast"].classList.contains("hidden"), false);
+  assert.ok(elements["error-toast"].textContent.includes("ambiguous or duplicate header"));
+});
+
+test("runTableTraining rejects outcome column colliding with selected feature header", async () => {
+  let trainCalled = false;
+  const fetchMock = async (url) => {
+    if (url.endsWith("/train-table")) {
+      trainCalled = true;
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+
+  const { context, elements } = bootTaskPane({ fetchMock });
+
+  elements["table-range"].value = "Sheet1!A1:C10";
+  // Outcome "Survived", feature column has "survived" (differing only by case/whitespace)
+  vm.runInContext("TABLE_HEADERS = ['Survived', '  survived  ', 'fare'];", context);
+  vm.runInContext("TABLE_ROWS = [[1, 1, 10], [0, 0, 20]];", context);
+  vm.runInContext("TABLE_DESCRIPTOR = { rowIndex: 0, columnIndex: 0, values: [] };", context);
+  vm.runInContext("TABLE_PROFILE_DATA = { suggested_y_index: 0 };", context);
+
+  elements["table-y-select"].value = "0";
+
+  // Select feature column 1 ("  survived  ")
+  const cb1 = element("col-1", "input", "checkbox");
+  cb1.className = "table-col-checkbox";
+  cb1.checked = true;
+  cb1.dataset.colIndex = "1";
+
+  elements["table-columns-list"].children = [cb1];
+
+  await vm.runInContext("runTableTraining()", context);
+
+  assert.equal(trainCalled, false, "Training must not be called when outcome collides with selected feature");
+  assert.equal(elements["error-toast"].classList.contains("hidden"), false);
+  assert.ok(elements["error-toast"].textContent.includes("cannot also be selected as an input feature"));
+});
+
+test("table mode What-If renders literal _missing_ and \\_missing\\_ categories and submits blank as null", async () => {
+  let lastRequestBody = null;
+  const fetchMock = async (url, opts) => {
+    if (url.endsWith("/predict-table")) {
+      lastRequestBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          model_id: "m_cat_test",
+          results: [{ score: 0.25, prob: 0.562, pred: 1 }],
+          warnings: [],
+          class_labels: { positive: "1", negative: "0" },
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+
+  const { context, elements } = bootTaskPane({ fetchMock });
+
+  const mockModel = {
+    table_mode: true,
+    model_id: "m_cat_test",
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["target", "status"],
+      selected_indices: [1],
+      column_specs: [
+        {
+          source_index: 1,
+          source_header: "status",
+          col_type: "categorical",
+          reference_category: "active",
+          categories: ["pending", "_missing_", "\\_missing\\_"],
+          all_train_categories: ["active", "pending", "_missing_", "\\_missing\\_"],
+          has_missing_indicator: true,
+          missing_indicator_offset: 3,
+          missing_feature_name: "status=_missing_",
+          generated_features: ["status=pending", "status=_missing_", "status=\\_missing\\_"],
+        },
+      ],
+      generated_feature_names: ["status=pending", "status=_missing_", "status=\\_missing\\_"],
+    },
+    feature_names: ["status=pending", "status=_missing_", "status=\\_missing\\_"],
+    class_labels: { positive: "1", negative: "0" },
+    parameters: {
+      weights_model_space: [0.5, -0.3, 0.8],
+      intercept_model_space: 0.0,
+      conversion_valid: true,
+    },
+    inference: {},
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+
+  const inputs = context.document.querySelectorAll("#whatif-inputs input, #whatif-inputs select");
+  assert.equal(inputs.length, 1);
+  const select = inputs[0];
+  const optionValues = select.children.map((opt) => opt.value);
+  const optionTexts = select.children.map((opt) => opt.textContent);
+
+  // 1. Verify separate blank option for true missingness
+  assert.equal(optionValues[0], "");
+  assert.equal(optionTexts[0], "(Missing / Blank)");
+
+  // 2. Verify reference category has (Ref) label
+  assert.equal(optionValues[1], "active");
+  assert.equal(optionTexts[1], "active (Ref)");
+
+  // 3. Verify real category "pending"
+  assert.equal(optionValues[2], "pending");
+  assert.equal(optionTexts[2], "pending");
+
+  // 4. Verify literal "_missing_" is preserved and selectable
+  assert.equal(optionValues[3], "_missing_");
+  assert.equal(optionTexts[3], "_missing_");
+
+  // 5. Verify literal "\\_missing\\_" is preserved and selectable
+  assert.equal(optionValues[4], "\\_missing\\_");
+  assert.equal(optionTexts[4], "\\_missing\\_");
+
+  // Test submitting blank -> payload has null
+  select.value = "";
+  await vm.runInContext("runWhatIf()", context);
+  assert.equal(lastRequestBody.rows[0][1], null);
+
+  // Test submitting literal "_missing_" -> payload has "_missing_"
+  select.value = "_missing_";
+  await vm.runInContext("runWhatIf()", context);
+  assert.equal(lastRequestBody.rows[0][1], "_missing_");
+
+  // Test submitting literal "\\_missing\\_" -> payload has "\\_missing\\_"
+  select.value = "\\_missing\\_";
+  await vm.runInContext("runWhatIf()", context);
+  assert.equal(lastRequestBody.rows[0][1], "\\_missing\\_");
+
+  // Test submitting reference category -> payload has "active"
+  select.value = "active";
+  await vm.runInContext("runWhatIf()", context);
+  assert.equal(lastRequestBody.rows[0][1], "active");
+});
+
+test("what-if and batch predictions agree on payload representation for blank, literal _missing_, and reference categories", async () => {
+  let batchRequestBody = null;
+  let whatifRequests = [];
+
+  const fetchMock = async (url, opts) => {
+    if (url.endsWith("/predict-table")) {
+      const parsedBody = JSON.parse(opts.body);
+      if (parsedBody.explain) {
+        whatifRequests.push(parsedBody);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            model_id: "m_agree_test",
+            results: [{ score: 0.1, prob: 0.525, pred: 1 }],
+            warnings: [],
+            class_labels: { positive: "1", negative: "0" },
+          }),
+        };
+      } else {
+        batchRequestBody = parsedBody;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            model_id: "m_agree_test",
+            results: [
+              { score: 0.1, prob: 0.525, pred: 1 },
+              { score: 0.2, prob: 0.550, pred: 1 },
+              { score: 0.3, prob: 0.574, pred: 1 },
+              { score: 0.0, prob: 0.500, pred: 1 },
+            ],
+            warnings: [],
+            class_labels: { positive: "1", negative: "0" },
+          }),
+        };
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+
+  const newRowsRange = makeRange(
+    "NewData",
+    "$A$1:$A$5",
+    [
+      ["status"],
+      [""],
+      ["_missing_"],
+      ["\\_missing\\_"],
+      ["active"],
+    ],
+    0,
+    0
+  );
+
+  const excelContext = createMockExcelContext(
+    {
+      NewData: {
+        id: "nd1",
+        ranges: {
+          "A1:A5": newRowsRange,
+          "$A$1:$A$5": newRowsRange,
+        },
+      },
+    },
+    {},
+    "NewData"
+  );
+
+  const { context, elements } = bootTaskPane({ excelContext, fetchMock });
+  elements["new-x-range"].value = "NewData!A1:A5";
+  elements["new-has-header"].checked = true;
+
+  const mockModel = {
+    table_mode: true,
+    model_id: "m_agree_test",
+    _activeThreshold: 0.5,
+    _stale: false,
+    table_metadata: {
+      source_headers: ["status"],
+      selected_indices: [0],
+      column_specs: [
+        {
+          source_index: 0,
+          source_header: "status",
+          col_type: "categorical",
+          reference_category: "active",
+          categories: ["pending", "_missing_", "\\_missing\\_"],
+          all_train_categories: ["active", "pending", "_missing_", "\\_missing\\_"],
+          has_missing_indicator: true,
+          generated_features: ["status=pending", "status=_missing_", "status=\\_missing\\_"],
+        },
+      ],
+      generated_feature_names: ["status=pending", "status=_missing_", "status=\\_missing\\_"],
+    },
+    feature_names: ["status=pending", "status=_missing_", "status=\\_missing\\_"],
+    class_labels: { positive: "1", negative: "0" },
+  };
+
+  vm.runInContext("LAST_RESULT = " + JSON.stringify(mockModel), context);
+  vm.runInContext("setModelActionsEnabled(true)", context);
+
+  // 1. Run batch scoring
+  await vm.runInContext("scoreNewRows()", context);
+  assert.equal(batchRequestBody.rows.length, 4);
+
+  // 2. Run What-If for each input row
+  vm.runInContext("buildWhatIf(LAST_RESULT.feature_names)", context);
+  const inputs = context.document.querySelectorAll("#whatif-inputs input, #whatif-inputs select");
+  const select = inputs[0];
+
+  const testInputs = ["", "_missing_", "\\_missing\\_", "active"];
+  for (const inp of testInputs) {
+    select.value = inp;
+    await vm.runInContext("runWhatIf()", context);
+  }
+
+  assert.equal(whatifRequests.length, 4);
+
+  // Verify What-If representation aligns with batch prediction row representation:
+  // Row 0: blank in batch is "" -> whatif is null (both are treated as missing cell in backend)
+  assert.equal(batchRequestBody.rows[0][0], "");
+  assert.equal(whatifRequests[0].rows[0][0], null);
+
+  // Row 1: literal "_missing_" in batch matches whatif
+  assert.equal(batchRequestBody.rows[1][0], "_missing_");
+  assert.equal(whatifRequests[1].rows[0][0], "_missing_");
+
+  // Row 2: literal "\\_missing\\_" in batch matches whatif
+  assert.equal(batchRequestBody.rows[2][0], "\\_missing\\_");
+  assert.equal(whatifRequests[2].rows[0][0], "\\_missing\\_");
+
+  // Row 3: reference category in batch matches whatif
+  assert.equal(batchRequestBody.rows[3][0], "active");
+  assert.equal(whatifRequests[3].rows[0][0], "active");
+});
 

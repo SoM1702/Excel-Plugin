@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import math
+import os
 from typing import Literal
+from urllib.parse import urlsplit
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from model import DEFAULT_THRESHOLD, TrainedModel, train_logistic, train_table_logistic
+from model_registry import ModelRegistry
 from table_schema import (
     TablePredictRequest,
     TableProfileRequest,
@@ -26,16 +28,56 @@ app = FastAPI(
     version="0.3.0",
 )
 
-# CORS middleware for the local or hosted Office.js task pane
+def _parse_cors_origins(raw_origins: str) -> list[str]:
+    origins = []
+    for raw_origin in raw_origins.split(","):
+        origin = raw_origin.strip()
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or "*" in parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError(
+                "CORS_ALLOWED_ORIGINS must contain exact HTTPS origins without paths, "
+                "credentials, query strings, or fragments."
+            )
+        try:
+            port = parsed.port  # Validate malformed port syntax.
+        except ValueError as exc:
+            raise RuntimeError("CORS_ALLOWED_ORIGINS contains an invalid port.") from exc
+        hostname = parsed.hostname.lower()
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        netloc = hostname if port in (None, 443) else f"{hostname}:{port}"
+        normalized = f"https://{netloc}"
+        if normalized not in origins:
+            origins.append(normalized)
+    return origins
+
+
+# Local development serves the pane from this origin by default. Configure
+# hosted task-pane origins through CORS_ALLOWED_ORIGINS on the API service.
+_CORS_ALLOWED_ORIGINS = _parse_cors_origins(
+    os.environ.get("CORS_ALLOWED_ORIGINS", "https://localhost:3001")
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
-# Single-user in-memory model storage
-_LAST_MODEL: dict[str, TrainedModel | None] = {"model": None}
+# Temporary, process-local beta storage. Public use requires authenticated
+# ownership and a durable shared store; see the deployment master plan.
+_MODEL_REGISTRY = ModelRegistry[TrainedModel](max_models=100, ttl_seconds=24 * 60 * 60)
 
 
 class TrainRequest(BaseModel):
@@ -61,12 +103,12 @@ class PredictRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    model = _LAST_MODEL["model"]
+    model_count = len(_MODEL_REGISTRY)
     return {
         "status": "ok",
         "engine": "scratch",
-        "has_model": model is not None,
-        "model_id": model.model_id if model is not None else None,
+        "has_model": model_count > 0,
+        "model_count": model_count,
     }
 
 
@@ -94,19 +136,19 @@ def train(req: TrainRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Training failed: {exc}") from exc
 
-    _LAST_MODEL["model"] = model
+    _MODEL_REGISTRY.store(model)
     return result
 
 
 @app.post("/predict")
 def predict(req: PredictRequest):
-    model = _LAST_MODEL["model"]
+    model = _MODEL_REGISTRY.get(req.model_id)
     if model is None:
-        raise HTTPException(status_code=400, detail="Train a model first, then predict.")
-    if req.model_id != model.model_id:
+        if len(_MODEL_REGISTRY) == 0:
+            raise HTTPException(status_code=400, detail="Train a model first, then predict.")
         raise HTTPException(
             status_code=409,
-            detail="This model is no longer active. Train again before predicting.",
+            detail="This model is not active or has expired. Train again before predicting.",
         )
 
     try:
@@ -121,9 +163,21 @@ def predict(req: PredictRequest):
     if not np.isfinite(X).all():
         raise HTTPException(status_code=400, detail="Prediction features must be finite numbers.")
 
-    scores, probabilities = model.predict_score_and_proba(X)
+    try:
+        scores, probabilities = model.predict_score_and_proba(X)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prediction features are outside the supported numerical range: {exc}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
+
     if not np.isfinite(scores).all() or not np.isfinite(probabilities).all():
-        raise HTTPException(status_code=500, detail="The model returned an invalid score or probability.")
+        raise HTTPException(
+            status_code=400,
+            detail="Prediction failed because computed scores are non-finite (numerical overflow).",
+        )
     return {
         "ok": True,
         "model_id": model.model_id,
@@ -193,19 +247,19 @@ def api_train_table(req: TableTrainRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Table training failed: {exc}") from exc
 
-    _LAST_MODEL["model"] = model
+    _MODEL_REGISTRY.store(model)
     return result
 
 
 @app.post("/predict-table")
 def api_predict_table(req: TablePredictRequest):
-    model = _LAST_MODEL["model"]
+    model = _MODEL_REGISTRY.get(req.model_id)
     if model is None:
-        raise HTTPException(status_code=400, detail="Train a model first, then predict.")
-    if req.model_id != model.model_id:
+        if len(_MODEL_REGISTRY) == 0:
+            raise HTTPException(status_code=400, detail="Train a model first, then predict.")
         raise HTTPException(
             status_code=409,
-            detail="This model is no longer active. Train again before predicting.",
+            detail="This model is not active or has expired. Train again before predicting.",
         )
     if model.table_preprocessor is None:
         raise HTTPException(
@@ -223,7 +277,30 @@ def api_predict_table(req: TablePredictRequest):
     if not np.isfinite(scores).all() or not np.isfinite(probabilities).all():
         raise HTTPException(status_code=500, detail="The model returned an invalid score or probability.")
 
-    return {
+    explanation = None
+    explanation_unavailable = None
+    if (req.explain or len(req.rows) == 1) and len(req.rows) > 0:
+        try:
+            explanation = model.explain_raw_table_row(req.headers, req.rows[0], start_row=req.start_row)
+        except Exception as exc:
+            explanation = None
+            explanation_unavailable = f"Explanation unavailable: {str(exc) or type(exc).__name__}"
+
+    results = []
+    for i, (score, probability) in enumerate(zip(scores, probabilities)):
+        res_item = {
+            "score": float(score),
+            "prob": float(probability),
+            "pred": int(probability >= req.threshold),
+        }
+        if i == 0:
+            if explanation is not None:
+                res_item["explanation"] = explanation
+            elif explanation_unavailable is not None:
+                res_item["explanation_unavailable"] = explanation_unavailable
+        results.append(res_item)
+
+    response = {
         "ok": True,
         "model_id": model.model_id,
         "threshold": req.threshold,
@@ -232,13 +309,11 @@ def api_predict_table(req: TablePredictRequest):
             "negative": str(model.class_labels[0]),
             "positive": str(model.class_labels[1]),
         },
-        "results": [
-            {
-                "score": float(score),
-                "prob": float(probability),
-                "pred": int(probability >= req.threshold),
-            }
-            for score, probability in zip(scores, probabilities)
-        ],
+        "results": results,
     }
+    if explanation is not None:
+        response["explanation"] = explanation
+    elif explanation_unavailable is not None:
+        response["explanation_unavailable"] = explanation_unavailable
+    return response
 

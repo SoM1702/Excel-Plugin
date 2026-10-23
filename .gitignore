@@ -2,13 +2,19 @@
 backend/.venv/
 __pycache__/
 *.pyc
+.env
+.env.*
+!.env.example
 
 # Node
 addin/node_modules/
+addin/dist/
 
 # Generated
 backend/*_evaluation.json
 addin/manifest.prod.xml
+outputs/
+~$*.xlsx
 
 # OS
 .DS_Store
