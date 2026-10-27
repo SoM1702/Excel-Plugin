@@ -2,12 +2,13 @@
 
 This plan moves the Excel add-in from local development to an invited hosted beta, then to a secure public release. Hosting is not, by itself, a public launch. Preserve the scratch NumPy logistic-regression engine and the working localhost development path. The code now has a temporary process-local beta model registry and exact-origin CORS configuration, but it still has no authenticated user ownership, durable shared storage, or public workload controls.
 
-See the [detailed deployment roadmap](../PUBLIC_DEPLOYMENT_IMPLEMENTATION_PLAN.md) for additional acceptance cases.
+This is the active deployment roadmap. Completed implementation history is consolidated in [CHANGELOG.md](../CHANGELOG.md); the earlier duplicate roadmap has been removed.
 
 ## Implementation status
 
 - **Implemented locally:** repository ignores for secrets, generated output, and Excel lock files; tracked lock file removed from Git's index while retained on disk; exact direct Python dependency pins; GitHub Actions workflow; bounded 100-model/24-hour in-memory beta registry; configurable exact-origin CORS; and a deployment builder that generates a static bundle, production API configuration, and manifest from supplied HTTPS URLs.
-- **Verified locally:** backend suite passes (101 tests) and add-in suite passes (107 tests). The Microsoft manifest validation service and Docker daemon were unavailable in the local environment, so remote manifest validation and image build remain unverified. The GitHub Actions workflow has not run on GitHub yet.
+- **Verified locally:** backend suite passes (114 tests) and add-in suite passes (119 tests). A bundle was generated using example HTTPS URLs and its key assets and backend configuration were checked locally; these are not live deployment addresses. The Microsoft manifest validation service and Docker daemon were unavailable in the local environment, so remote manifest validation and image build remain unverified. GitHub Actions status was not checked in this session.
+- **Beta guidance:** the task pane identifies trained models as temporary, and both prediction APIs provide retraining guidance when a model is unavailable after expiry, restart, eviction, or routing to a different process. These messages do not provide persistent model storage.
 - **Not deployed:** no hosting provider, staging URL, or credentials have been configured. The registry is temporary and does not provide authenticated ownership or durable storage.
 
 ## Architecture and release gates

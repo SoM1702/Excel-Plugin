@@ -1,5 +1,7 @@
 # Known issues found during live Excel testing
 
+Historical record: the two issues below were addressed in the changes included in `09ae4fb`, with later automated regression checks passing. They are retained as reproduction history, not a list of currently open defects. See [CHANGELOG.md](CHANGELOG.md) for current status and remaining verification.
+
 ## Table-mode What-if button can be disabled incorrectly
 
 Observed 2026-10-15 in the original Titanic table workflow: the single-row What-if form rendered source-column inputs, but **Calculate probability** was disabled.

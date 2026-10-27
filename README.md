@@ -1,5 +1,9 @@
 # Excel Logistic Regression Add-in (Scratch Engine)
 
+New teammate? Start with [TEAMMATE_START_HERE.md](TEAMMATE_START_HERE.md).
+The consolidated development timeline is in [CHANGELOG.md](CHANGELOG.md).
+Future deployment work is tracked in [the active roadmap](docs/HYBRID_PUBLIC_DEPLOYMENT_PLAN.md).
+
 This project integrates binary logistic regression into Microsoft Excel from
 scratch. Select numeric feature columns ($X$) and one binary outcome column ($Y$)
 in your spreadsheet, then train a model using our pure NumPy full-batch gradient

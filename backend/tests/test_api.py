@@ -140,6 +140,18 @@ class ApiTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as err:
             predict(PredictRequest(model_id="any-id", features=[self.features[0]], threshold=0.5))
         self.assertEqual(err.exception.status_code, 400)
+        self.assertIn("restarted", err.exception.detail)
+        self.assertIn("Train a model again", err.exception.detail)
+
+    def test_missing_model_guidance_on_both_prediction_routes(self):
+        for path, body in (
+            ("/predict", {"model_id": "lost", "features": [self.features[0]]}),
+            ("/predict-table", {"model_id": "lost", "headers": ["x"], "rows": [[1]]}),
+        ):
+            status, data = asyncio.run(asgi_call("POST", path, body))
+            self.assertEqual(status, 400)
+            self.assertIn("restarted", data["detail"])
+            self.assertIn("Train a model again", data["detail"])
 
     def test_api_rejects_invalid_test_size_before_training(self):
         with self.assertRaises(ValidationError):

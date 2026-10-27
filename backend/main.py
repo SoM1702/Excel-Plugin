@@ -145,10 +145,10 @@ def predict(req: PredictRequest):
     model = _MODEL_REGISTRY.get(req.model_id)
     if model is None:
         if len(_MODEL_REGISTRY) == 0:
-            raise HTTPException(status_code=400, detail="Train a model first, then predict.")
+            raise HTTPException(status_code=400, detail="Model unavailable. The service may have restarted or the model may have expired. Train a model again before predicting.")
         raise HTTPException(
             status_code=409,
-            detail="This model is not active or has expired. Train again before predicting.",
+            detail="Model unavailable. It may have expired, been removed, or belong to another server process. Train a model again before predicting.",
         )
 
     try:
@@ -256,10 +256,10 @@ def api_predict_table(req: TablePredictRequest):
     model = _MODEL_REGISTRY.get(req.model_id)
     if model is None:
         if len(_MODEL_REGISTRY) == 0:
-            raise HTTPException(status_code=400, detail="Train a model first, then predict.")
+            raise HTTPException(status_code=400, detail="Model unavailable. The service may have restarted or the model may have expired. Train a model again before predicting.")
         raise HTTPException(
             status_code=409,
-            detail="This model is not active or has expired. Train again before predicting.",
+            detail="Model unavailable. It may have expired, been removed, or belong to another server process. Train a model again before predicting.",
         )
     if model.table_preprocessor is None:
         raise HTTPException(

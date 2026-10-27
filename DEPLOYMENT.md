@@ -1,66 +1,47 @@
 # Deployment notes
 
-For local development, the task pane runs at HTTPS localhost port 3001 and
-the Python API runs at HTTPS localhost port 8000. To use the add-in on another
-machine without installing Python or Node, host both parts over HTTPS.
+For local setup use [TEAMMATE_START_HERE.md](TEAMMATE_START_HERE.md). For the release sequence and acceptance gates use [the active deployment roadmap](docs/HYBRID_PUBLIC_DEPLOYMENT_PLAN.md).
 
-    Excel loads task pane files from an HTTPS static host.
-    The task pane calls the FastAPI service at an HTTPS API host.
+## Current architecture
 
-## Backend
+Excel loads the task pane from an HTTPS static site. The task pane sends requests to the Python FastAPI service over HTTPS. The scratch model runs in Python. Hosting has not been verified or configured as part of the source ZIP handoff.
 
-The backend contains a Dockerfile. A container host such as Render, Railway,
-Fly.io, or another HTTPS-capable provider can run it.
+## Build the static bundle
 
-1. Push the project to a repository.
-2. Create a web service whose root directory is backend.
-3. Build from the included Dockerfile.
-4. Confirm the deployed address ends with /health and returns status ok.
+Install dependencies with `npm ci` in `addin`, then supply all four deployment values:
 
-For a local container check:
+```bash
+cd addin
+node configure-url.js https://YOUR-FRONTEND.example.com/addin https://YOUR-API.example.com "Your actual team name" https://YOUR-SUPPORT.example.com
+```
 
-    cd backend
-    docker build -t lr-backend .
-    docker run -p 8000:8000 lr-backend
+Replace those example values with real addresses. Publish the contents of `addin/dist` at the frontend base URL. The bundle contains `manifest.prod.xml`, assets, task-pane source, and generated API configuration. Local source URLs remain localhost. A previously saved backend override in the task pane can override the configured default; inspect backend settings when switching environments.
 
-The provided Docker command exposes HTTP locally. A hosted Excel task pane
-must call an HTTPS endpoint, so terminate TLS at the hosting provider or put
-an HTTPS proxy in front of the container.
+Validate the generated manifest separately:
 
-## Front-end
+```bash
+node validate-manifest.js dist/manifest.prod.xml
+```
 
-Host the addin directory as HTTPS static files. GitHub Pages is one possible
-choice. Then generate a manifest that refers to the hosted task pane:
+The validator requires an external Microsoft service and correctly fails if the service is unavailable. A generated XML file alone does not establish official acceptance.
 
-    cd addin
-    node configure-url.js https://YOUR-USER.github.io/YOUR-REPOSITORY/addin
+## Backend configuration
 
-This creates manifest.prod.xml. Its task-pane and ribbon asset URLs point to
-the hosted front-end. It does not set the API address; that remains a user
-setting in the task pane.
+Set `CORS_ALLOWED_ORIGINS` to the exact frontend origin, for example `https://YOUR-FRONTEND.example.com` (no `/addin` path). It is a comma-separated list if multiple origins are needed. The local default is `https://localhost:3001`.
 
-## Demo machine
+For a local container check, with the Docker daemon running:
 
-1. Upload manifest.prod.xml through Excel's My Add-ins area.
-2. Open Backend settings in the task pane.
-3. Save the HTTPS address of the deployed API.
-4. Train a model, then export a report or score new rows.
+```bash
+docker build -t lr-backend backend
+docker run --rm -p 8000:8000 -e CORS_ALLOWED_ORIGINS=https://localhost:3001 lr-backend
+```
 
-## Production limitations to resolve first
+This container serves HTTP; a hosted API needs HTTPS termination supplied by its host or proxy. The normal local development instructions use Uvicorn with development HTTPS certificates. Verify `/health` and an actual training/prediction request in the intended environment.
 
-The current backend keeps exactly one recently trained model in memory. A new
-training request replaces it, and a restart removes it. The returned model ID
-prevents a browser from accidentally using a replaced model, but it is not
-authentication or durable storage.
+## Current limitations
 
-The development configuration allows calls from every origin. Before deploying
-with non-demo data, restrict CORS in backend/main.py to the hosted add-in
-origin, add authentication, isolate models by user/session, store approved
-models securely, and define data-retention rules.
+The model registry holds up to 100 models in one process with 24-hour expiry and least-recently-used eviction. Restarting loses them; separate workers do not share models. A model ID is not authenticated ownership.
 
-Free hosting tiers often sleep after inactivity. The first model request can
-take longer while the service wakes. This is a hosting behavior, not evidence
-that the model itself is slow.
+CORS limits browser origins but does not restrict direct API clients. Before an invited internet beta, provide access control as described in the roadmap. Public release still requires authentication, ownership checks, persistent storage, workload controls, privacy decisions, monitoring and live Excel verification. A privately shared manifest does not secure an otherwise public API.
 
-Before distributing the manifest, replace the placeholder provider name in
-addin/manifest.xml with the actual team or organisation name.
+The container and hosted release have not been verified by the local unit tests. Use synthetic or explicitly approved data while completing deployment acceptance.
